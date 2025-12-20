@@ -1174,7 +1174,8 @@ Examples:
     spray_parser.add_argument("--base-dn", dest="base_dn", help="Override LDAP base DN")
     spray_parser.add_argument("--passwords", dest="spray_passwords", help="File containing passwords to spray")
     spray_parser.add_argument("--users", dest="users_file", help="File containing users (skip enumeration)")
-    spray_parser.add_argument("-o", "--output", help="Output file for valid credentials")
+    spray_parser.add_argument("-o", "--output", default="valid_creds.txt",
+                              help="Output file for valid credentials (default: valid_creds.txt)")
     spray_parser.add_argument("-v", "--verbose", type=int, default=3, choices=[0, 1, 2, 3],
                               help="Verbosity level (0=silent, 3=max, default: 3)")
     spray_parser.add_argument("--userpass", action="store_true", help="Try username as password")
