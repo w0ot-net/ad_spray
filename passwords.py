@@ -26,7 +26,7 @@ def create_password_list(company, include_seasons=True, base_year=None, year_ran
     results.update(one_offs)
     
     for word in words:
-        variants = [word, word.lower(), word.capitalize(), word.upper()]
+        variants = [word, word.lower(), word.capitalize()]
         
         for variant in variants:
             results.add(variant)
