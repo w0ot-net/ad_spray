@@ -14,7 +14,7 @@ def create_password_list(company, include_seasons=True, base_year=None, year_ran
     specials = ["!", "@", "#", "$", "1"]
     results = set()  # Use set to avoid duplicates
     
-    words = ["password", company, company.lower(), company.upper()]
+    words = ["password", company, company.lower(), company.capitalize()]
     
     if include_seasons:
         words += season_words

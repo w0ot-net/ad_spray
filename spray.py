@@ -20,6 +20,7 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
 import signal
 import sys
 import time
@@ -328,8 +329,112 @@ class SprayEngine:
         self.stopped = False
         self.consecutive_lockouts = 0
 
+        # Status bar tracking
+        self._status_bar_enabled = sys.stderr.isatty() and verbose > 0
+        self._terminal_rows = 24
+        self._start_time: Optional[datetime] = None
+        self._total_passwords = 0
+        self._current_password_num = 0
+
         # Set up signal handlers
         signal.signal(signal.SIGINT, self._handle_interrupt)
+
+        # Get terminal size
+        if self._status_bar_enabled:
+            try:
+                size = shutil.get_terminal_size()
+                self._terminal_rows = size.lines
+            except Exception:
+                pass
+
+    def _setup_status_bar(self):
+        """Reserve the bottom line for status bar."""
+        if not self._status_bar_enabled:
+            return
+        # Scroll region excludes bottom line, move cursor up
+        sys.stderr.write(f"\033[1;{self._terminal_rows - 1}r")  # Set scroll region
+        sys.stderr.write(f"\033[{self._terminal_rows - 1};1H")   # Move to line above status
+        sys.stderr.flush()
+
+    def _cleanup_status_bar(self):
+        """Restore terminal to normal state."""
+        if not self._status_bar_enabled:
+            return
+        # Reset scroll region to full screen
+        sys.stderr.write(f"\033[1;{self._terminal_rows}r")
+        # Clear status line
+        sys.stderr.write(f"\033[{self._terminal_rows};1H\033[2K")
+        # Move cursor to end of content area
+        sys.stderr.write(f"\033[{self._terminal_rows - 1};1H")
+        sys.stderr.flush()
+
+    def _update_status_bar(self, password: str = "", extra: str = ""):
+        """Update the status bar at bottom of terminal."""
+        if not self._status_bar_enabled:
+            return
+
+        # Calculate ETA
+        eta_str = self._calculate_eta_string()
+
+        # Build status line
+        if extra:
+            status = f" {Colors.LBLUE}[{extra}]{Colors.NC} | {eta_str}"
+        elif password:
+            status = f" {Colors.LBLUE}Password:{Colors.NC} {password} | {eta_str}"
+        else:
+            status = f" {eta_str}"
+
+        # Save cursor, move to bottom line, clear it, print status, restore cursor
+        sys.stderr.write("\0337")  # Save cursor position
+        sys.stderr.write(f"\033[{self._terminal_rows};1H")  # Move to bottom line
+        sys.stderr.write("\033[2K")  # Clear line
+        sys.stderr.write(f"{Colors.ORANGE}{status}{Colors.NC}")
+        sys.stderr.write("\0338")  # Restore cursor position
+        sys.stderr.flush()
+
+    def _calculate_eta_string(self) -> str:
+        """Calculate and format the ETA string."""
+        if not self._start_time or self._total_passwords == 0:
+            return "ETA: calculating..."
+
+        passwords_remaining = self._total_passwords - self._current_password_num
+        if passwords_remaining <= 0:
+            return "ETA: completing..."
+
+        safe_attempts = self.session.get_safe_attempts_per_window()
+        sleep_time = self.session.get_sleep_time_seconds()
+
+        # Calculate remaining sleep cycles
+        if safe_attempts >= 100 or sleep_time == 0:
+            # No lockout policy - estimate based on elapsed time
+            elapsed = (datetime.now() - self._start_time).total_seconds()
+            if self._current_password_num > 0:
+                time_per_password = elapsed / self._current_password_num
+                remaining_seconds = int(passwords_remaining * time_per_password)
+            else:
+                return "ETA: calculating..."
+        else:
+            # Calculate based on sleep cycles
+            remaining_sleeps = passwords_remaining // safe_attempts
+            remaining_seconds = remaining_sleeps * sleep_time
+
+            # Add estimate for actual spray time (rough: 1 sec per user per password)
+            users_active = len(self.session.users) - len(self.session.skipped_users)
+            remaining_seconds += passwords_remaining * users_active * 1
+
+        # Format the ETA
+        eta_time = datetime.now() + timedelta(seconds=remaining_seconds)
+
+        if remaining_seconds < 60:
+            time_str = f"{remaining_seconds}s"
+        elif remaining_seconds < 3600:
+            time_str = f"{remaining_seconds // 60}m {remaining_seconds % 60}s"
+        else:
+            hours = remaining_seconds // 3600
+            mins = (remaining_seconds % 3600) // 60
+            time_str = f"{hours}h {mins}m"
+
+        return f"ETA: {eta_time.strftime('%H:%M:%S')} ({time_str} remaining) | {self._current_password_num}/{self._total_passwords} passwords"
 
     def _handle_interrupt(self, signum, frame):
         """Handle Ctrl+C for pause functionality."""
@@ -462,70 +567,88 @@ class SprayEngine:
 
         self._print(f"{Colors.ORANGE}[+] Starting password spray...{Colors.NC}", level=2)
 
-        # Handle user-as-password first if enabled
-        if config.user_as_pass and self.session.current_password_index == 0:
-            self._print(f"{Colors.ORANGE}[+] Trying username as password...{Colors.NC}", level=2)
-            for username in self.session.users:
+        # Initialize status bar tracking
+        self._start_time = datetime.now()
+        self._total_passwords = len(valid_passwords) + (1 if config.user_as_pass else 0)
+        self._current_password_num = 0
+        self._setup_status_bar()
+
+        try:
+            # Handle user-as-password first if enabled
+            if config.user_as_pass and self.session.current_password_index == 0:
+                self._current_password_num = 1
+                self._update_status_bar(password="<username>")
+                self._print(f"{Colors.ORANGE}[+] Trying username as password...{Colors.NC}", level=2)
+                for username in self.session.users:
+                    if self.stopped:
+                        break
+                    if username in self.session.skipped_users:
+                        continue
+                    meets, reason = self.session.password_meets_policy(username, username)
+                    if not meets:
+                        self._print(
+                            f"{Colors.ORANGE}[!] Skipping user '{username}' as password - {reason}{Colors.NC}",
+                            level=3
+                        )
+                        continue
+
+                    self._spray_single(username, username)
+
+                if not self.stopped:
+                    self.session.attempts_since_sleep += 1
+                    if self._should_sleep():
+                        self._update_status_bar(extra=f"Sleeping {sleep_time // 60}m")
+                        self._do_sleep(sleep_time)
+
+            # Main password loop
+            passwords_to_try = valid_passwords[self.session.current_password_index:]
+
+            for pwd_idx, password in enumerate(passwords_to_try, start=self.session.current_password_index):
                 if self.stopped:
-                    break
-                if username in self.session.skipped_users:
-                    continue
-                meets, reason = self.session.password_meets_policy(username, username)
-                if not meets:
-                    self._print(
-                        f"{Colors.ORANGE}[!] Skipping user '{username}' as password - {reason}{Colors.NC}",
-                        level=3
-                    )
-                    continue
+                    self._print(f"\n{Colors.RED}[+] Spray stopped by user.{Colors.NC}", level=1)
+                    self._save_session()
+                    return False
 
-                self._spray_single(username, username)
+                # Update progress tracking
+                self._current_password_num = pwd_idx + 1 + (1 if config.user_as_pass else 0)
+                self._update_status_bar(password=password)
 
-            if not self.stopped:
+                self._print(f"{Colors.ORANGE}[+] Spraying password:{Colors.NC} {password}", level=2)
+
+                for username in self.session.users:
+                    if self.stopped:
+                        break
+                    if username in self.session.skipped_users:
+                        continue
+
+                    # Skip if password contains this username (complexity rule)
+                    if self.session.password_contains_username(password, username):
+                        self._print(
+                            f"{Colors.ORANGE}[!] Skipping {username}:{password} - "
+                            f"password contains username{Colors.NC}",
+                            level=3
+                        )
+                        continue
+
+                    self._spray_single(username, password)
+
+                self.session.current_password_index = pwd_idx + 1
                 self.session.attempts_since_sleep += 1
-                if self._should_sleep():
+
+                # Check if we need to sleep
+                if self._should_sleep() and pwd_idx < len(valid_passwords) - 1:
+                    self._update_status_bar(extra=f"Sleeping {sleep_time // 60}m")
                     self._do_sleep(sleep_time)
 
-        # Main password loop
-        passwords_to_try = valid_passwords[self.session.current_password_index:]
-
-        for pwd_idx, password in enumerate(passwords_to_try, start=self.session.current_password_index):
-            if self.stopped:
-                self._print(f"\n{Colors.RED}[+] Spray stopped by user.{Colors.NC}", level=1)
+                # Periodic save
                 self._save_session()
-                return False
 
-            self._print(f"{Colors.ORANGE}[+] Spraying password:{Colors.NC} {password}", level=2)
-
-            for username in self.session.users:
-                if self.stopped:
-                    break
-                if username in self.session.skipped_users:
-                    continue
-
-                # Skip if password contains this username (complexity rule)
-                if self.session.password_contains_username(password, username):
-                    self._print(
-                        f"{Colors.ORANGE}[!] Skipping {username}:{password} - "
-                        f"password contains username{Colors.NC}",
-                        level=3
-                    )
-                    continue
-
-                self._spray_single(username, password)
-
-            self.session.current_password_index = pwd_idx + 1
-            self.session.attempts_since_sleep += 1
-
-            # Check if we need to sleep
-            if self._should_sleep() and pwd_idx < len(valid_passwords) - 1:
-                self._do_sleep(sleep_time)
-
-            # Periodic save
+            # Mark completed
+            self.session.config.completed = True
             self._save_session()
 
-        # Mark completed
-        self.session.config.completed = True
-        self._save_session()
+        finally:
+            self._cleanup_status_bar()
 
         self._print(f"\n{Colors.GREEN}[+] Spray completed successfully.{Colors.NC}", level=1)
         stats = self.session.get_stats()
@@ -554,10 +677,13 @@ class SprayEngine:
         )
         self._save_session()
 
-        # Sleep in chunks so we can respond to interrupts
+        # Sleep in chunks so we can respond to interrupts and update status
         remaining = sleep_time
         while remaining > 0 and not self.stopped:
-            chunk = min(remaining, 10)
+            mins = remaining // 60
+            secs = remaining % 60
+            self._update_status_bar(extra=f"Sleeping {mins}m {secs}s")
+            chunk = min(remaining, 5)
             time.sleep(chunk)
             remaining -= chunk
 
@@ -920,7 +1046,6 @@ def cmd_delete(args) -> int:
         print(f"{Colors.RED}[!] Session not found: {args.session_id}{Colors.NC}", file=sys.stderr)
         return 1
 
-    import shutil
     shutil.rmtree(session_path)
     print(f"{Colors.GREEN}[+] Deleted session: {args.session_id}{Colors.NC}", file=sys.stderr)
     return 0
