@@ -738,7 +738,7 @@ class SprayEngine:
             mins = remaining // 60
             secs = remaining % 60
             self._update_status_bar(extra=f"Sleeping {mins}m {secs}s")
-            chunk = min(remaining, 5)
+            chunk = min(remaining, 1)
             time.sleep(chunk)
             remaining -= chunk
 
