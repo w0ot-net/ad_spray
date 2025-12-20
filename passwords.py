@@ -11,7 +11,7 @@ def create_password_list(company, include_seasons=True, base_year=None, year_ran
     
     one_offs = ["welcome", "Welcome1", "letmein", "Password", "P@ssw0rd"]
     season_words = ["spring", "summer", "winter", "fall", "autumn"]
-    specials = ["!", "@", "#", "$", "123!", "1"]
+    specials = ["!", "@", "#", "$", "1"]
     results = set()  # Use set to avoid duplicates
     
     words = ["password", company, company.lower(), company.upper()]
