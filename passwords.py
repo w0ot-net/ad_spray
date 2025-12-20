@@ -9,7 +9,7 @@ def create_password_list(company, include_seasons=True, base_year=None, year_ran
     if base_year is None:
         base_year = datetime.now().year - 1  # Start from last year
     
-    one_offs = ["welcome", "Welcome1", "letmein", , "Password", "P@ssw0rd"]
+    one_offs = ["welcome", "Welcome1", "letmein", "Password", "P@ssw0rd"]
     season_words = ["spring", "summer", "winter", "fall", "autumn"]
     specials = ["!", "@", "#", "$", "123!", "1"]
     results = set()  # Use set to avoid duplicates
