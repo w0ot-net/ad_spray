@@ -53,7 +53,7 @@ def score_password(password, company, city, current_year):
         score -= 10
     
     # Common one-offs get a boost
-    common_oneoffs = ["Password1", "Welcome1", "P@ssw0rd"]
+    common_oneoffs = ["Password1", "P@ssw0rd"]
     if password in common_oneoffs:
         score += 50
     
@@ -77,9 +77,10 @@ def create_password_list(company, include_seasons=True, base_year=None, year_ran
     
     current_year = datetime.now().year
     
-    one_offs = ["welcome", "Welcome1", "letmein", "Password", "P@ssw0rd"]
+    one_offs = ["welcome", "letmein", "Password", "P@ssw0rd"]
     season_words = ["spring", "summer", "winter", "fall", "autumn"]
     specials = ["!", "@", "#", "$", "1"]
+    specials_no_1 = ["!", "@", "#", "$"]  # For use with years and number sequences
     results = set()  # Use set to avoid duplicates
     
     words = ["password", company, company.lower(), company.capitalize()]
@@ -107,7 +108,7 @@ def create_password_list(company, include_seasons=True, base_year=None, year_ran
                     results.add(f"{variant}{yr}")
                     results.add(f"{variant}@{yr}")
                     
-                    for special in specials:
+                    for special in specials_no_1:
                         results.add(f"{variant}{yr}{special}")
                         results.add(f"{variant}@{yr}{special}")
             
@@ -119,7 +120,7 @@ def create_password_list(company, include_seasons=True, base_year=None, year_ran
                     results.add(f"{variant}{numbers}")
                     results.add(f"{variant}@{numbers}")
                     
-                    for special in specials:
+                    for special in specials_no_1:
                         results.add(f"{variant}{numbers}{special}")
                         results.add(f"{variant}@{numbers}{special}")
     
