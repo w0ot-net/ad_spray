@@ -286,33 +286,28 @@ class SpraySession:
             if categories < 3:
                 return False, "doesn't meet complexity (need 3 of: upper, lower, digit, special)"
 
-            # Cannot contain username (case-insensitive, >2 consecutive chars)
+            # Cannot contain username (case-insensitive)
+            # Note: Windows also checks display name tokens, but we don't have display names
             if username and len(username) > 2:
-                username_lower = username.lower()
-                password_lower = password.lower()
-                # Check for any 3+ char substring of username in password
-                for i in range(len(username_lower) - 2):
-                    if username_lower[i:i+3] in password_lower:
-                        return False, f"contains username substring"
+                if username.lower() in password.lower():
+                    return False, "contains username"
 
         return True, None
 
     def password_contains_username(self, password: str, username: str) -> bool:
         """
-        Check if password contains username substring (3+ chars).
-        Only relevant when complexity is enabled.
+        Check if password contains username (case-insensitive).
+        
+        Windows complexity rule: password cannot contain the sAMAccountName.
+        Note: The "3+ char token" rule applies to display name tokens, not username.
+        Since we don't have display names, we only check for full username.
         """
         if not self.policy.complexity_enabled:
             return False
         if len(username) <= 2:
             return False
 
-        username_lower = username.lower()
-        password_lower = password.lower()
-        for i in range(len(username_lower) - 2):
-            if username_lower[i:i+3] in password_lower:
-                return True
-        return False
+        return username.lower() in password.lower()
 
 
 # ---------------------------------------------------------------------------
