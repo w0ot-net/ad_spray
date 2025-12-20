@@ -17,6 +17,7 @@ Requires: pip install ldap3
 """
 
 import argparse
+import atexit
 import hashlib
 import json
 import os
@@ -328,9 +329,12 @@ class SprayEngine:
         self.paused = False
         self.stopped = False
         self.consecutive_lockouts = 0
+        self._pause_requested = False  # Flag for async signal handler
 
         # Status bar tracking
-        self._status_bar_enabled = sys.stderr.isatty() and verbose > 0
+        self._is_tty = sys.stderr.isatty() and sys.stdin.isatty()
+        self._status_bar_enabled = self._is_tty and verbose > 0
+        self._status_bar_active = False  # Track if status bar is set up
         self._terminal_rows = 24
         self._start_time: Optional[datetime] = None
         self._total_passwords = 0
@@ -351,46 +355,67 @@ class SprayEngine:
         """Reserve the bottom line for status bar."""
         if not self._status_bar_enabled:
             return
-        # Scroll region excludes bottom line, move cursor up
-        sys.stderr.write(f"\033[1;{self._terminal_rows - 1}r")  # Set scroll region
-        sys.stderr.write(f"\033[{self._terminal_rows - 1};1H")   # Move to line above status
-        sys.stderr.flush()
+        try:
+            # Scroll region excludes bottom line, move cursor up
+            sys.stderr.write(f"\033[1;{self._terminal_rows - 1}r")  # Set scroll region
+            sys.stderr.write(f"\033[{self._terminal_rows - 1};1H")   # Move to line above status
+            sys.stderr.flush()
+            self._status_bar_active = True
+            # Register cleanup as safety net for abnormal exits
+            atexit.register(self._cleanup_status_bar)
+        except Exception:
+            # If terminal setup fails, disable status bar
+            self._status_bar_enabled = False
+            self._status_bar_active = False
 
     def _cleanup_status_bar(self):
         """Restore terminal to normal state."""
-        if not self._status_bar_enabled:
+        if not self._status_bar_active:
             return
-        # Reset scroll region to full screen
-        sys.stderr.write(f"\033[1;{self._terminal_rows}r")
-        # Clear status line
-        sys.stderr.write(f"\033[{self._terminal_rows};1H\033[2K")
-        # Move cursor to end of content area
-        sys.stderr.write(f"\033[{self._terminal_rows - 1};1H")
-        sys.stderr.flush()
+        self._status_bar_active = False
+        try:
+            # Unregister atexit handler since we're cleaning up normally
+            atexit.unregister(self._cleanup_status_bar)
+        except Exception:
+            pass
+        try:
+            # Reset scroll region to full screen
+            sys.stderr.write(f"\033[1;{self._terminal_rows}r")
+            # Clear status line
+            sys.stderr.write(f"\033[{self._terminal_rows};1H\033[2K")
+            # Move cursor to end of content area
+            sys.stderr.write(f"\033[{self._terminal_rows - 1};1H")
+            sys.stderr.flush()
+        except Exception:
+            pass  # Best effort cleanup
 
     def _update_status_bar(self, password: str = "", extra: str = ""):
         """Update the status bar at bottom of terminal."""
-        if not self._status_bar_enabled:
+        if not self._status_bar_active:
             return
 
-        # Calculate ETA
-        eta_str = self._calculate_eta_string()
+        try:
+            # Calculate ETA
+            eta_str = self._calculate_eta_string()
 
-        # Build status line
-        if extra:
-            status = f" {Colors.LBLUE}[{extra}]{Colors.NC} | {eta_str}"
-        elif password:
-            status = f" {Colors.LBLUE}Password:{Colors.NC} {password} | {eta_str}"
-        else:
-            status = f" {eta_str}"
+            # Build status line
+            if extra:
+                status = f" {Colors.LBLUE}[{extra}]{Colors.NC} | {eta_str}"
+            elif password:
+                status = f" {Colors.LBLUE}Password:{Colors.NC} {password} | {eta_str}"
+            else:
+                status = f" {eta_str}"
 
-        # Save cursor, move to bottom line, clear it, print status, restore cursor
-        sys.stderr.write("\0337")  # Save cursor position
-        sys.stderr.write(f"\033[{self._terminal_rows};1H")  # Move to bottom line
-        sys.stderr.write("\033[2K")  # Clear line
-        sys.stderr.write(f"{Colors.ORANGE}{status}{Colors.NC}")
-        sys.stderr.write("\0338")  # Restore cursor position
-        sys.stderr.flush()
+            # Save cursor, move to bottom line, clear it, print status, restore cursor
+            # Using portable escape sequences
+            sys.stderr.write("\033[s")  # Save cursor position
+            sys.stderr.write(f"\033[{self._terminal_rows};1H")  # Move to bottom line
+            sys.stderr.write("\033[2K")  # Clear line
+            sys.stderr.write(f"{Colors.ORANGE}{status}{Colors.NC}")
+            sys.stderr.write("\033[u")  # Restore cursor position
+            sys.stderr.flush()
+        except Exception:
+            pass  # Best effort - don't crash on status bar issues
 
     def _calculate_eta_string(self) -> str:
         """Calculate and format the ETA string."""
@@ -437,21 +462,47 @@ class SprayEngine:
         return f"ETA: {eta_time.strftime('%H:%M:%S')} ({time_str} remaining) | {self._current_password_num}/{self._total_passwords} passwords"
 
     def _handle_interrupt(self, signum, frame):
-        """Handle Ctrl+C for pause functionality."""
-        if self.paused:
+        """
+        Handle Ctrl+C signal - sets flag for main loop to check.
+        
+        Does NOT call input() here to avoid deadlocks. Instead, sets
+        _pause_requested flag which is checked in _check_pause().
+        """
+        if self._pause_requested or self.paused:
+            # Second Ctrl+C - stop immediately
             self.stopped = True
+            self.paused = False
+            self._pause_requested = False
+        else:
+            # First Ctrl+C - request pause
+            self._pause_requested = True
+
+    def _check_pause(self):
+        """
+        Check if pause was requested and handle it.
+        
+        Call this from the main loop to safely handle pause requests.
+        This is where we can safely call input() since we're in the main thread.
+        """
+        if not self._pause_requested:
             return
 
+        self._pause_requested = False
         self.paused = True
+
         self._print(f"\n{Colors.ORANGE}[+] Spray paused.{Colors.NC}", level=1)
         self._print(f"{Colors.ORANGE}[+] Press{Colors.NC} Ctrl+C {Colors.ORANGE}again to quit.{Colors.NC}", level=1)
         self._print(f"{Colors.ORANGE}[+] Press{Colors.NC} Enter {Colors.ORANGE}to continue.{Colors.NC}", level=1)
 
-        try:
-            input()
-            self.paused = False
-            self._print(f"{Colors.ORANGE}[+] Spray resumed.{Colors.NC}", level=1)
-        except EOFError:
+        if self._is_tty:
+            try:
+                input()
+                self.paused = False
+                self._print(f"{Colors.ORANGE}[+] Spray resumed.{Colors.NC}", level=1)
+            except EOFError:
+                self.stopped = True
+        else:
+            # Non-TTY: treat pause request as stop
             self.stopped = True
 
     def _print(self, message: str, level: int = 3, end: str = "\n"):
@@ -561,8 +612,11 @@ class SprayEngine:
 
         self._print("", level=1)
 
-        if self.verbose >= 1:
-            input("(Press Enter to start the spray)")
+        if self.verbose >= 1 and self._is_tty:
+            try:
+                input("(Press Enter to start the spray)")
+            except EOFError:
+                pass
             self._print("", level=1)
 
         self._print(f"{Colors.ORANGE}[+] Starting password spray...{Colors.NC}", level=2)
@@ -580,6 +634,7 @@ class SprayEngine:
                 self._update_status_bar(password="<username>")
                 self._print(f"{Colors.ORANGE}[+] Trying username as password...{Colors.NC}", level=2)
                 for username in self.session.users:
+                    self._check_pause()  # Check for pause request
                     if self.stopped:
                         break
                     if username in self.session.skipped_users:
@@ -604,6 +659,7 @@ class SprayEngine:
             passwords_to_try = valid_passwords[self.session.current_password_index:]
 
             for pwd_idx, password in enumerate(passwords_to_try, start=self.session.current_password_index):
+                self._check_pause()  # Check for pause request
                 if self.stopped:
                     self._print(f"\n{Colors.RED}[+] Spray stopped by user.{Colors.NC}", level=1)
                     self._save_session()
@@ -616,6 +672,7 @@ class SprayEngine:
                 self._print(f"{Colors.ORANGE}[+] Spraying password:{Colors.NC} {password}", level=2)
 
                 for username in self.session.users:
+                    self._check_pause()  # Check for pause request
                     if self.stopped:
                         break
                     if username in self.session.skipped_users:
@@ -680,6 +737,9 @@ class SprayEngine:
         # Sleep in chunks so we can respond to interrupts and update status
         remaining = sleep_time
         while remaining > 0 and not self.stopped:
+            self._check_pause()  # Check for pause request
+            if self.stopped:
+                break
             mins = remaining // 60
             secs = remaining % 60
             self._update_status_bar(extra=f"Sleeping {mins}m {secs}s")
