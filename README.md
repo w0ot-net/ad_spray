@@ -57,4 +57,4 @@ ad_spray delete <id>           # Delete session
 
 ## Config File
 
-Generate a template: `ad_spray generate-config -o config.ini`
+See sample configs in `config/` directory.

@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .config import load_config, generate_config_file, merge_config_with_args
+from .config import load_config, merge_config_with_args
 from .constants import (
     Colors,
     DEFAULT_SESSION_PATH,
@@ -497,16 +497,6 @@ def cmd_export(args) -> int:
     return 0
 
 
-def cmd_generate_config(args) -> int:
-    """Generate a template configuration file."""
-    output = generate_config_file(args.output)
-    if args.output:
-        print(f"{Colors.GREEN}[+] {output}{Colors.NC}", file=sys.stderr)
-    else:
-        print(output)
-    return 0
-
-
 def main() -> int:
     """Main entry point for the CLI."""
     parser = argparse.ArgumentParser(
@@ -616,11 +606,6 @@ Examples:
     export_parser.add_argument("--session-path", default=str(DEFAULT_SESSION_PATH),
                                help=f"Session storage path (default: {DEFAULT_SESSION_PATH})")
     export_parser.set_defaults(func=cmd_export)
-
-    # Generate-config subcommand
-    genconfig_parser = subparsers.add_parser("generate-config", help="Generate a template configuration file")
-    genconfig_parser.add_argument("-o", "--output", help="Output file path (prints to stdout if not specified)")
-    genconfig_parser.set_defaults(func=cmd_generate_config)
 
     args = parser.parse_args()
 

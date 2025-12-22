@@ -2,81 +2,9 @@
 
 import argparse
 import configparser
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from .scheduling import BusinessHoursWindow, DAYS_OF_WEEK
-
-
-DEFAULT_CONFIG_TEMPLATE = """\
-# ADSpray Configuration File
-# --------------------------
-# Use 'auto' for users_file, lockout_threshold, lockout_window, min_length,
-# and complexity to automatically fetch values from Active Directory.
-# IMPORTANT: 'auto' settings REQUIRE valid AD credentials in [target].
-# If any setting is 'auto' and credentials are missing, the spray will fail.
-
-[target]
-# Domain controller FQDN or IP address
-dc = 10.0.0.1
-# NetBIOS domain/workgroup name
-workgroup = CORP
-# AD credentials for enumeration (REQUIRED for any 'auto' settings)
-username = admin
-password = P@ssw0rd!
-# Use LDAPS (SSL/TLS)
-ssl = false
-# Override port number (optional, leave empty for default)
-port =
-# Override LDAP base DN (optional, leave empty for auto-detect)
-base_dn =
-
-[spray]
-# File containing passwords to spray
-passwords_file = passwords.txt
-# File containing usernames, or 'auto' to enumerate from AD (requires credentials)
-users_file = auto
-# Output file for valid credentials
-output = valid_creds.txt
-# Try username as password
-userpass = false
-# Verbosity level (0=silent, 1=minimal, 2=normal, 3=verbose)
-verbose = 3
-
-[policy]
-# Lockout threshold, or 'auto' to fetch from AD (requires credentials)
-# 0 = no lockout policy
-lockout_threshold = auto
-# Lockout observation window in minutes, or 'auto' to fetch from AD (requires credentials)
-lockout_window = auto
-# Minimum password length, or 'auto' to fetch from AD (requires credentials)
-min_length = auto
-# Require password complexity, or 'auto' to fetch from AD (requires credentials)
-complexity = auto
-
-[schedule]
-# Timezone for business hours (IANA format, e.g., America/New_York, Europe/London)
-# Leave empty to disable business hours feature
-timezone =
-# Number of attempts to reduce during business hours
-# Formula: attempts_allowed = lockout_threshold - business_hours_reduction
-# e.g., if threshold=5 and reduction=3, then 5-3=2 attempts allowed during business hours
-# If the result is 0 or negative, spray pauses entirely during business hours
-business_hours_reduction = 3
-# Force use of system clock instead of external time verification
-# WARNING: Only set to 'true' if you cannot access external time sources
-# If enabled, ensure your system clock is accurate to avoid spraying during business hours
-force_system_time = false
-# Business hours for each day (HH:MM-HH:MM format, 24-hour)
-# Use 'off' to indicate no restrictions (full speed spraying)
-# Use 'pause' to pause entirely on that day
-monday = 09:00-17:00
-tuesday = 09:00-17:00
-wednesday = 09:00-17:00
-thursday = 09:00-17:00
-friday = 09:00-17:00
-saturday = off
-sunday = off
-"""
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -169,13 +97,3 @@ def merge_config_with_args(config: Dict[str, Any], args: argparse.Namespace) -> 
         setattr(args, arg_key, config_value)
 
     return args
-
-
-def generate_config_file(output_path: Optional[str] = None) -> str:
-    """Generate a template configuration file."""
-    if output_path:
-        with open(output_path, 'w') as f:
-            f.write(DEFAULT_CONFIG_TEMPLATE)
-        return f"Configuration template written to: {output_path}"
-    else:
-        return DEFAULT_CONFIG_TEMPLATE
