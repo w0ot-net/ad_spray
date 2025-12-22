@@ -63,19 +63,15 @@ class SprayConfig:
     verbose: int
     user_as_pass: bool
     created_at: str
+    name: str  # Human-readable session name (required)
     completed: bool = False
-    name: Optional[str] = None  # Human-readable session name
-    tags: List[str] = field(default_factory=list)  # Session tags for organization
+    tags: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "SprayConfig":
-        # Handle missing fields for backward compatibility
-        d = d.copy()
-        d.setdefault('name', None)
-        d.setdefault('tags', [])
         return cls(**d)
 
 

@@ -33,6 +33,50 @@ from .session import (
 )
 
 
+def prompt_session_selection(session_path: Path, filter_completed: bool = None) -> str:
+    """
+    Display numbered list of sessions and prompt user to select one.
+
+    Args:
+        session_path: Path to session storage
+        filter_completed: If True, only show completed. If False, only incomplete. If None, show all.
+
+    Returns:
+        Selected session ID, or None if no sessions or user cancels.
+    """
+    sessions = list_sessions(session_path)
+
+    if filter_completed is not None:
+        sessions = [s for s in sessions if s["completed"] == filter_completed]
+
+    if not sessions:
+        return None
+
+    print(f"\n{Colors.BLUE}Available sessions:{Colors.NC}\n", file=sys.stderr)
+
+    for i, s in enumerate(sessions, 1):
+        name_display = s.get('name') or s['session_id']
+        status = f"{Colors.GREEN}completed{Colors.NC}" if s["completed"] else f"{Colors.ORANGE}in progress{Colors.NC}"
+        valid = s.get('valid', 0)
+        print(f"  {Colors.LBLUE}[{i}]{Colors.NC} {name_display} ({status}, {valid} valid)", file=sys.stderr)
+
+    print(file=sys.stderr)
+
+    while True:
+        try:
+            choice = input("Select session number: ").strip()
+            if not choice:
+                return None
+            idx = int(choice) - 1
+            if 0 <= idx < len(sessions):
+                return sessions[idx]["session_id"]
+            print(f"{Colors.RED}[!] Invalid selection{Colors.NC}", file=sys.stderr)
+        except ValueError:
+            print(f"{Colors.RED}[!] Enter a number{Colors.NC}", file=sys.stderr)
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+
 def cmd_spray(args) -> int:
     """Execute a new spray or resume an existing one."""
     session_path = Path(args.session_path)
@@ -70,16 +114,52 @@ def cmd_spray(args) -> int:
             if current is None or (isinstance(current, bool) and not current and value):
                 setattr(args, arg_key, value)
 
+    # Handle --get-creds mode (just show credentials and exit)
+    if getattr(args, 'get_creds', None) is not None:
+        session_id = args.get_creds
+        if session_id is True:
+            # No session specified, prompt for selection
+            session_id = prompt_session_selection(session_path)
+            if not session_id:
+                print(f"{Colors.ORANGE}[!] No sessions available.{Colors.NC}", file=sys.stderr)
+                return 1
+
+        try:
+            session = load_session(session_path, session_id)
+        except FileNotFoundError:
+            print(f"{Colors.RED}[!] Session not found: {session_id}{Colors.NC}", file=sys.stderr)
+            return 1
+
+        # Print valid credentials
+        found_any = False
+        for attempt in session.attempts:
+            if attempt.status in VALID_CREDENTIAL_STATUSES:
+                found_any = True
+                suffix = "" if attempt.status == ERROR_SUCCESS else f" # {attempt.status.replace('ERROR_', '')}"
+                print(f"{attempt.username}:{attempt.password}{suffix}")
+
+        if not found_any:
+            print(f"{Colors.ORANGE}[!] No valid credentials found.{Colors.NC}", file=sys.stderr)
+        return 0
+
     if args.resume:
         # Resume existing session
+        session_id = args.resume
+        if session_id is True:
+            # No session specified, prompt for selection (only incomplete sessions)
+            session_id = prompt_session_selection(session_path, filter_completed=False)
+            if not session_id:
+                print(f"{Colors.ORANGE}[!] No incomplete sessions to resume.{Colors.NC}", file=sys.stderr)
+                return 1
+
         try:
-            session = load_session(session_path, args.resume)
+            session = load_session(session_path, session_id)
             if session.config.completed:
                 print(f"{Colors.ORANGE}[!] Session already completed.{Colors.NC}", file=sys.stderr)
                 return 1
-            print(f"{Colors.GREEN}[+] Resuming session: {args.resume}{Colors.NC}", file=sys.stderr)
+            print(f"{Colors.GREEN}[+] Resuming session: {session.config.name} ({session_id}){Colors.NC}", file=sys.stderr)
         except FileNotFoundError:
-            print(f"{Colors.RED}[!] Session not found: {args.resume}{Colors.NC}", file=sys.stderr)
+            print(f"{Colors.RED}[!] Session not found: {session_id}{Colors.NC}", file=sys.stderr)
             return 1
     else:
         # Validate required args
@@ -261,6 +341,15 @@ def cmd_spray(args) -> int:
             print(f"{Colors.RED}[!] No users found{Colors.NC}", file=sys.stderr)
             return 1
 
+        # Get session name (prompt if not provided)
+        session_name = getattr(args, 'name', None)
+        if not session_name:
+            while True:
+                session_name = input("Session name: ").strip()
+                if session_name:
+                    break
+                print(f"{Colors.RED}[!] Session name is required{Colors.NC}", file=sys.stderr)
+
         session = create_session(
             dc_host=args.dc,
             workgroup=args.workgroup,
@@ -273,13 +362,12 @@ def cmd_spray(args) -> int:
             port=args.port,
             output_file=args.output or 'valid_creds.txt',
             verbose=args.verbose or 3,
-            name=getattr(args, 'name', None),
+            name=session_name,
             tags=getattr(args, 'tag', None) or [],
             session_path=session_path,
         )
         # Note: create_session now handles saving with new storage format
-        session_name = session.config.name or session.config.session_id
-        print(f"{Colors.GREEN}[+] Created session: {session_name} ({session.config.session_id}){Colors.NC}", file=sys.stderr)
+        print(f"{Colors.GREEN}[+] Created session: {session.config.name} ({session.config.session_id}){Colors.NC}", file=sys.stderr)
 
     # Set up time verification
     force_system_time = getattr(args, 'force_system_time', False)
@@ -458,8 +546,17 @@ Examples:
   %(prog)s -d 10.0.0.1 -w CORP --users users.txt --passwords pwds.txt \\
       --lockout-threshold 3 --lockout-window 15 --min-length 10 --complexity
 
-  # Resume existing spray
-  %(prog)s --resume 305578a5af638c2b377b41b43e693291
+  # Resume existing spray (with session ID)
+  %(prog)s --resume session_1
+
+  # Resume (interactive session selection)
+  %(prog)s --resume
+
+  # Get credentials from a session
+  %(prog)s --get-creds session_1
+
+  # Get credentials (interactive session selection)
+  %(prog)s --get-creds
 
   # Use 'auto' for users and policy (requires AD creds)
   %(prog)s --config spray.ini  # with users_file=auto, lockout_threshold=auto, etc.
@@ -479,7 +576,10 @@ Examples:
     spray_parser.add_argument("--userpass", action="store_true", help="Try username as password")
     spray_parser.add_argument("--ssl", action="store_true", help="Use LDAPS (SSL/TLS)")
     spray_parser.add_argument("--port", type=int, help="Override port number")
-    spray_parser.add_argument("--resume", metavar="SESSION_ID", help="Resume an existing session")
+    spray_parser.add_argument("--resume", nargs="?", const=True, metavar="SESSION_ID",
+                              help="Resume an existing session (prompts for selection if no ID given)")
+    spray_parser.add_argument("--get-creds", nargs="?", const=True, metavar="SESSION_ID",
+                              help="Show valid credentials from a session (prompts for selection if no ID given)")
     spray_parser.add_argument("--session-path", default=str(DEFAULT_SESSION_PATH),
                               help=f"Session storage path (default: {DEFAULT_SESSION_PATH})")
     # Policy override flags (used when no AD creds available, or 'auto' for AD lookup)

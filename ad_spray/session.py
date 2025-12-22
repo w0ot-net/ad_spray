@@ -1,9 +1,6 @@
 """Session management for spray operations."""
 
-import hashlib
-import os
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -22,10 +19,26 @@ from .storage import (
 )
 
 
-def generate_session_id() -> str:
-    """Generate a unique session ID."""
-    data = f"{time.time()}-{os.getpid()}-{os.urandom(8).hex()}"
-    return hashlib.sha256(data.encode()).hexdigest()[:16]
+def generate_session_id(session_path: Path) -> str:
+    """Generate the next sequential session ID (session_1, session_2, etc.)."""
+    session_path.mkdir(parents=True, exist_ok=True)
+
+    # Find existing session numbers
+    existing_nums = set()
+    for entry in session_path.iterdir():
+        if entry.is_dir() and entry.name.startswith("session_"):
+            try:
+                num = int(entry.name.split("_", 1)[1])
+                existing_nums.add(num)
+            except (ValueError, IndexError):
+                pass
+
+    # Find next available number
+    next_num = 1
+    while next_num in existing_nums:
+        next_num += 1
+
+    return f"session_{next_num}"
 
 
 def create_session(
@@ -35,17 +48,17 @@ def create_session(
     passwords: List[str],
     policy: PasswordPolicy,
     schedule: Schedule,
+    name: str,
     user_as_pass: bool = False,
     use_ssl: bool = False,
     port: Optional[int] = None,
     output_file: Optional[str] = None,
     verbose: int = 3,
-    name: Optional[str] = None,
     tags: Optional[List[str]] = None,
     session_path: Path = DEFAULT_SESSION_PATH,
 ) -> SpraySession:
     """Create a new spray session with the new storage format."""
-    session_id = generate_session_id()
+    session_id = generate_session_id(session_path)
 
     config = SprayConfig(
         session_id=session_id,
