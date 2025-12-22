@@ -1,6 +1,15 @@
 """Constants used throughout the application."""
 
+import re
 from pathlib import Path
+
+# Regex pattern to match ANSI escape codes
+_ANSI_ESCAPE_PATTERN = re.compile(r'\033\[[0-9;]*m')
+
+
+def strip_colors(text: str) -> str:
+    """Remove ANSI color codes from text."""
+    return _ANSI_ESCAPE_PATTERN.sub('', text)
 
 
 class Colors:

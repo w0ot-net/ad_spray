@@ -7,10 +7,11 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TextIO
 
 from .constants import (
     Colors,
+    strip_colors,
     ERROR_SUCCESS,
     ERROR_NO_SUCH_USER,
     ERROR_ACCOUNT_DISABLED,
@@ -49,6 +50,9 @@ class SprayEngine:
 
         # Session store for efficient I/O
         self._store = SessionStore(session_path, session.config.session_id)
+
+        # Log file for detailed output
+        self._log_file: Optional[TextIO] = None
 
         # Status bar tracking
         self._is_tty = sys.stderr.isatty() and sys.stdin.isatty()
@@ -234,10 +238,38 @@ class SprayEngine:
             # Non-TTY: treat pause request as stop
             self.stopped = True
 
-    def _print(self, message: str, level: int = 3, end: str = "\n"):
-        """Print message if verbosity level is high enough."""
+    def _open_log_file(self):
+        """Open the session log file for writing."""
+        if self._log_file is None:
+            self._log_file = open(self._store.log_path, 'a', encoding='utf-8')
+
+    def _close_log_file(self):
+        """Close the session log file."""
+        if self._log_file is not None:
+            self._log_file.close()
+            self._log_file = None
+
+    def _log(self, message: str, end: str = "\n"):
+        """Write message to log file (colors stripped)."""
+        if self._log_file is not None:
+            self._log_file.write(strip_colors(message) + end)
+            self._log_file.flush()
+
+    def _print(self, message: str, level: int = 3, end: str = "\n", screen: bool = True, log: bool = True):
+        """Print message based on verbosity and output routing.
+
+        Args:
+            message: The message to print
+            level: Verbosity level required (0=always, 1=important, 2=info, 3=verbose)
+            end: Line ending
+            screen: Whether to output to screen (stderr)
+            log: Whether to output to log file
+        """
         if self.verbose >= level:
-            print(message, end=end, file=sys.stderr, flush=True)
+            if screen:
+                print(message, end=end, file=sys.stderr, flush=True)
+            if log:
+                self._log(message, end)
 
     def _save_session(self):
         """Save current session state."""
@@ -305,7 +337,7 @@ class SprayEngine:
             self._print(
                 f"{Colors.ORANGE}[+] Pausing during business hours. "
                 f"Resuming in ~{hours}h {mins}m...{Colors.NC}",
-                level=1
+                level=1, screen=False
             )
             self._update_status_bar(extra=f"Paused (business hours) - {hours}h {mins}m remaining")
 
@@ -324,26 +356,29 @@ class SprayEngine:
         config = self.session.config
         policy = self.session.policy
 
-        # Display time verification status
-        self._print(f"{Colors.ORANGE}[+] Time Verification{Colors.NC}", level=1)
-        self._print(f"{Colors.BLUE}[+]     Time Source:{Colors.NC} {self.time_verifier.source}", level=1)
+        # Open log file for detailed output
+        self._open_log_file()
+
+        # Display time verification status (log only)
+        self._print(f"{Colors.ORANGE}[+] Time Verification{Colors.NC}", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]     Time Source:{Colors.NC} {self.time_verifier.source}", level=1, screen=False)
 
         if self.session.schedule.is_enabled():
             current_time = self.time_verifier.get_current_time(self.session.schedule.timezone)
-            self._print(f"{Colors.BLUE}[+]   Current Time:{Colors.NC} {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}", level=1)
+            self._print(f"{Colors.BLUE}[+]   Current Time:{Colors.NC} {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}", level=1, screen=False)
         else:
             current_time = self.time_verifier.get_current_time()
-            self._print(f"{Colors.BLUE}[+]   Current Time:{Colors.NC} {current_time.strftime('%Y-%m-%d %H:%M:%S')} UTC", level=1)
+            self._print(f"{Colors.BLUE}[+]   Current Time:{Colors.NC} {current_time.strftime('%Y-%m-%d %H:%M:%S')} UTC", level=1, screen=False)
 
-        self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1)
+        self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1, screen=False)
 
-        # Display schedule information if enabled
+        # Display schedule information if enabled (log only)
         if self.session.schedule.is_enabled():
-            self._print(f"{Colors.ORANGE}[+] Business Hours Schedule{Colors.NC}", level=1)
+            self._print(f"{Colors.ORANGE}[+] Business Hours Schedule{Colors.NC}", level=1, screen=False)
             schedule_display = format_schedule_display(self.session.schedule, self.time_verifier)
             for line in schedule_display.split('\n'):
-                self._print(f"{Colors.BLUE}[+]{Colors.NC}{line}", level=1)
-            self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1)
+                self._print(f"{Colors.BLUE}[+]{Colors.NC}{line}", level=1, screen=False)
+            self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1, screen=False)
 
         safe_attempts = self.session.get_safe_attempts_per_window(apply_schedule=False)  # Base for display
         sleep_time = self.session.get_sleep_time_seconds()
@@ -370,7 +405,7 @@ class SprayEngine:
             if not meets:
                 self._print(
                     f"{Colors.ORANGE}[!] Skipping password '{pwd}' - {reason}{Colors.NC}",
-                    level=2
+                    level=2, screen=False
                 )
                 self.session.skipped_passwords.add(pwd)
                 continue
@@ -380,51 +415,51 @@ class SprayEngine:
         total_passwords = len(valid_passwords)
         total_attempts = total_users * total_passwords
 
-        # Print configuration
-        self._print(f"{Colors.ORANGE}[+] Spray Configuration{Colors.NC}", level=1)
-        self._print(f"{Colors.BLUE}[+]         Session:{Colors.NC} {config.session_id}", level=1)
-        self._print(f"{Colors.BLUE}[+]         DC Host:{Colors.NC} {config.dc_host}", level=1)
-        self._print(f"{Colors.BLUE}[+]       Workgroup:{Colors.NC} {config.workgroup}", level=1)
-        self._print(f"{Colors.BLUE}[+]    User as Pass:{Colors.NC} {config.user_as_pass}", level=1)
-        self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1)
-        self._print(f"{Colors.BLUE}[+]   Lockout Policy{Colors.NC}", level=1)
-        self._print(f"{Colors.BLUE}[+]       Threshold:{Colors.NC} {policy.lockout_threshold} attempts", level=1)
-        self._print(f"{Colors.BLUE}[+]      Obs Window:{Colors.NC} {policy.lockout_observation_window_minutes} min", level=1)
-        self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1)
-        self._print(f"{Colors.BLUE}[+]  Password Policy{Colors.NC}", level=1)
-        self._print(f"{Colors.BLUE}[+]    Min Pwd Len:{Colors.NC} {policy.min_password_length}", level=1)
-        self._print(f"{Colors.BLUE}[+]    Complexity:{Colors.NC} {'Enabled' if policy.complexity_enabled else 'Disabled'}", level=1)
-        self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1)
-        self._print(f"{Colors.BLUE}[+]   Spray Strategy{Colors.NC}", level=1)
-        self._print(f"{Colors.BLUE}[+]  Safe attempts:{Colors.NC} {safe_attempts} per window", level=1)
+        # Print configuration (log only)
+        self._print(f"{Colors.ORANGE}[+] Spray Configuration{Colors.NC}", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]         Session:{Colors.NC} {config.session_id}", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]         DC Host:{Colors.NC} {config.dc_host}", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]       Workgroup:{Colors.NC} {config.workgroup}", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]    User as Pass:{Colors.NC} {config.user_as_pass}", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]   Lockout Policy{Colors.NC}", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]       Threshold:{Colors.NC} {policy.lockout_threshold} attempts", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]      Obs Window:{Colors.NC} {policy.lockout_observation_window_minutes} min", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]  Password Policy{Colors.NC}", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]    Min Pwd Len:{Colors.NC} {policy.min_password_length}", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]    Complexity:{Colors.NC} {'Enabled' if policy.complexity_enabled else 'Disabled'}", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]   Spray Strategy{Colors.NC}", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]  Safe attempts:{Colors.NC} {safe_attempts} per window", level=1, screen=False)
         if self.session.schedule.is_enabled():
             reduced = self.session.schedule.get_reduced_attempts(policy.lockout_threshold)
-            self._print(f"{Colors.BLUE}[+]  Business hrs:{Colors.NC} {reduced} per window (reduction: {self.session.schedule.business_hours_reduction})", level=1)
+            self._print(f"{Colors.BLUE}[+]  Business hrs:{Colors.NC} {reduced} per window (reduction: {self.session.schedule.business_hours_reduction})", level=1, screen=False)
         if sleep_time > 0:
-            self._print(f"{Colors.BLUE}[+]     Sleep time:{Colors.NC} {sleep_time // 60} min", level=1)
+            self._print(f"{Colors.BLUE}[+]     Sleep time:{Colors.NC} {sleep_time // 60} min", level=1, screen=False)
         else:
-            self._print(f"{Colors.BLUE}[+]     Sleep time:{Colors.NC} None (no lockout)", level=1)
-        self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1)
-        self._print(f"{Colors.BLUE}[+]          Users:{Colors.NC} {len(self.session.users)} ({total_users} active)", level=1)
-        self._print(f"{Colors.BLUE}[+]      Passwords:{Colors.NC} {len(self.session.passwords)} ({total_passwords} valid)", level=1)
-        self._print(f"{Colors.BLUE}[+]  Est. Attempts:{Colors.NC} {total_attempts}", level=1)
+            self._print(f"{Colors.BLUE}[+]     Sleep time:{Colors.NC} None (no lockout)", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]          Users:{Colors.NC} {len(self.session.users)} ({total_users} active)", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]      Passwords:{Colors.NC} {len(self.session.passwords)} ({total_passwords} valid)", level=1, screen=False)
+        self._print(f"{Colors.BLUE}[+]  Est. Attempts:{Colors.NC} {total_attempts}", level=1, screen=False)
 
         if sleep_time > 0 and total_passwords > safe_attempts:
             num_sleeps = (total_passwords - 1) // safe_attempts
             eta_seconds = num_sleeps * sleep_time
             eta = datetime.now() + timedelta(seconds=eta_seconds)
-            self._print(f"{Colors.BLUE}[+]            ETA:{Colors.NC} {eta.strftime('%Y-%m-%d %H:%M')}", level=1)
+            self._print(f"{Colors.BLUE}[+]            ETA:{Colors.NC} {eta.strftime('%Y-%m-%d %H:%M')}", level=1, screen=False)
 
-        self._print("", level=1)
+        self._print("", level=1, screen=False)
 
         if self.verbose >= 1 and self._is_tty:
             try:
                 input("(Press Enter to start the spray)")
             except EOFError:
                 pass
-            self._print("", level=1)
+            self._print("", level=1, screen=False)
 
-        self._print(f"{Colors.ORANGE}[+] Starting password spray...{Colors.NC}", level=2)
+        self._print(f"{Colors.ORANGE}[+] Starting password spray...{Colors.NC}", level=2, screen=False)
 
         # Initialize status bar tracking
         self._start_time = datetime.now()
@@ -443,7 +478,7 @@ class SprayEngine:
 
                 self._current_password_num = 1
                 self._update_status_bar(password="<username>")
-                self._print(f"{Colors.ORANGE}[+] Trying username as password...{Colors.NC}", level=2)
+                self._print(f"{Colors.ORANGE}[+] Trying username as password...{Colors.NC}", level=2, screen=False)
                 for username in self.session.users:
                     self._check_pause()  # Check for pause request
                     if self.stopped:
@@ -454,7 +489,7 @@ class SprayEngine:
                     if not meets:
                         self._print(
                             f"{Colors.ORANGE}[!] Skipping user '{username}' as password - {reason}{Colors.NC}",
-                            level=3
+                            level=3, screen=False
                         )
                         continue
 
@@ -486,7 +521,7 @@ class SprayEngine:
                 self._current_password_num = pwd_idx + 1 + (1 if config.user_as_pass else 0)
                 self._update_status_bar(password=password)
 
-                self._print(f"{Colors.ORANGE}[+] Spraying password:{Colors.NC} {password}", level=2)
+                self._print(f"{Colors.ORANGE}[+] Spraying password:{Colors.NC} {password}", level=2, screen=False)
 
                 for username in self.session.users:
                     self._check_pause()  # Check for pause request
@@ -500,7 +535,7 @@ class SprayEngine:
                         self._print(
                             f"{Colors.ORANGE}[!] Skipping {username}:{password} - "
                             f"password contains username{Colors.NC}",
-                            level=3
+                            level=3, screen=False
                         )
                         continue
 
@@ -521,14 +556,15 @@ class SprayEngine:
             self.session.config.completed = True
             self._save_session()
 
+            self._print(f"\n{Colors.GREEN}[+] Spray completed successfully.{Colors.NC}", level=1)
+            stats = self.session.get_stats()
+            self._print(f"{Colors.GREEN}[+] Valid credentials:{Colors.NC} {stats.get(ERROR_SUCCESS, 0)}", level=1)
+            self._print(f"{Colors.GREEN}[+] Disabled accounts:{Colors.NC} {stats.get(ERROR_ACCOUNT_DISABLED, 0)}", level=1)
+            self._print(f"{Colors.GREEN}[+] Locked accounts:{Colors.NC} {stats.get(ERROR_ACCOUNT_LOCKED_OUT, 0)}", level=1)
+
         finally:
             self._cleanup_status_bar()
-
-        self._print(f"\n{Colors.GREEN}[+] Spray completed successfully.{Colors.NC}", level=1)
-        stats = self.session.get_stats()
-        self._print(f"{Colors.GREEN}[+] Valid credentials:{Colors.NC} {stats.get(ERROR_SUCCESS, 0)}", level=1)
-        self._print(f"{Colors.GREEN}[+] Disabled accounts:{Colors.NC} {stats.get(ERROR_ACCOUNT_DISABLED, 0)}", level=1)
-        self._print(f"{Colors.GREEN}[+] Locked accounts:{Colors.NC} {stats.get(ERROR_ACCOUNT_LOCKED_OUT, 0)}", level=1)
+            self._close_log_file()
 
         return True
 
@@ -553,7 +589,7 @@ class SprayEngine:
 
         self._print(
             f"{Colors.ORANGE}[+] Sleeping for {sleep_time // 60} minutes to avoid lockouts...{Colors.NC}",
-            level=1
+            level=1, screen=False
         )
         self._save_session()
 
@@ -574,13 +610,14 @@ class SprayEngine:
             time.sleep(min(remaining, 1))
 
         if not self.stopped:
-            self._print(f"{Colors.ORANGE}[+] Resuming spray...{Colors.NC}", level=1)
+            self._print(f"{Colors.ORANGE}[+] Resuming spray...{Colors.NC}", level=1, screen=False)
 
     def _spray_single(self, username: str, password: str):
         """Spray a single credential."""
+        # Log the attempt (log only)
         self._print(
             f"{Colors.BLUE}[+] Trying:{Colors.NC} {username}:{password} {Colors.BLUE}...{Colors.NC}",
-            level=3, end=""
+            level=3, end="", screen=False
         )
 
         status = self._check_credential(username, password)
@@ -608,33 +645,40 @@ class SprayEngine:
         if status == ERROR_SUCCESS:
             self.consecutive_lockouts = 0
             self.session.skipped_users.add(username)
-            self._print(f" {Colors.GREEN}VALID{Colors.NC}", level=1)
+            # Show valid creds on screen with full info, log just the result
+            self._print(f"{Colors.GREEN}[+] VALID:{Colors.NC} {username}:{password}", level=1, log=False)
+            self._print(f" {Colors.GREEN}VALID{Colors.NC}", level=1, screen=False)
             self._write_success(username, password, status)
 
         elif status == ERROR_ACCOUNT_DISABLED:
             self.consecutive_lockouts = 0
             self.session.skipped_users.add(username)
-            self._print(f" {Colors.GREEN}VALID{Colors.NC} but {Colors.RED}DISABLED{Colors.NC}", level=1)
+            self._print(f"{Colors.GREEN}[+] VALID:{Colors.NC} {username}:{password} {Colors.RED}(DISABLED){Colors.NC}", level=1, log=False)
+            self._print(f" {Colors.GREEN}VALID{Colors.NC} but {Colors.RED}DISABLED{Colors.NC}", level=1, screen=False)
             self._write_success(username, password, status)
 
         elif status == ERROR_PASSWORD_MUST_CHANGE:
             self.consecutive_lockouts = 0
             self.session.skipped_users.add(username)
-            self._print(f" {Colors.GREEN}VALID{Colors.NC} but {Colors.ORANGE}MUST_CHANGE{Colors.NC}", level=1)
+            self._print(f"{Colors.GREEN}[+] VALID:{Colors.NC} {username}:{password} {Colors.ORANGE}(MUST_CHANGE){Colors.NC}", level=1, log=False)
+            self._print(f" {Colors.GREEN}VALID{Colors.NC} but {Colors.ORANGE}MUST_CHANGE{Colors.NC}", level=1, screen=False)
             self._write_success(username, password, status)
 
         elif status == ERROR_PASSWORD_EXPIRED:
             self.consecutive_lockouts = 0
             self.session.skipped_users.add(username)
-            self._print(f" {Colors.GREEN}VALID{Colors.NC} but {Colors.ORANGE}PWD_EXPIRED{Colors.NC}", level=1)
+            self._print(f"{Colors.GREEN}[+] VALID:{Colors.NC} {username}:{password} {Colors.ORANGE}(PWD_EXPIRED){Colors.NC}", level=1, log=False)
+            self._print(f" {Colors.GREEN}VALID{Colors.NC} but {Colors.ORANGE}PWD_EXPIRED{Colors.NC}", level=1, screen=False)
             self._write_success(username, password, status)
 
         elif status == ERROR_ACCOUNT_LOCKED_OUT:
             self.session.skipped_users.add(username)
             self.consecutive_lockouts += 1
-            self._print(f" {Colors.RED}LOCKED_OUT{Colors.NC}", level=1)
+            # Log only - user sees status bar, lockouts are in log
+            self._print(f" {Colors.RED}LOCKED_OUT{Colors.NC}", level=1, screen=False)
 
             if self.consecutive_lockouts >= 3:
+                # These warnings go to screen - they're critical
                 self._print(
                     f"{Colors.RED}[!] 3+ consecutive lockouts detected! This shouldn't happen.{Colors.NC}",
                     level=1
@@ -649,16 +693,17 @@ class SprayEngine:
         elif status == ERROR_ACCOUNT_EXPIRED:
             self.consecutive_lockouts = 0
             self.session.skipped_users.add(username)
-            self._print(f" {Colors.RED}ACCOUNT_EXPIRED{Colors.NC}", level=1)
+            self._print(f" {Colors.RED}ACCOUNT_EXPIRED{Colors.NC}", level=1, screen=False)
 
         elif status == ERROR_NO_SUCH_USER:
             self.consecutive_lockouts = 0
             self.session.skipped_users.add(username)
-            self._print(f" {Colors.RED}NO_SUCH_USER{Colors.NC}", level=2)
+            self._print(f" {Colors.RED}NO_SUCH_USER{Colors.NC}", level=2, screen=False)
 
         elif status in (ERROR_HOST_UNREACHABLE, ERROR_GEN_FAILURE):
-            self._print(f" {Colors.RED}ERROR: {status}{Colors.NC}", level=1)
+            # Errors go to both screen and log
+            self._print(f"{Colors.RED}[!] ERROR: {status}{Colors.NC}", level=1)
 
         else:  # ERROR_LOGON_FAILURE or other
             self.consecutive_lockouts = 0
-            self._print(f" {Colors.RED}INVALID{Colors.NC}", level=3)
+            self._print(f" {Colors.RED}INVALID{Colors.NC}", level=3, screen=False)

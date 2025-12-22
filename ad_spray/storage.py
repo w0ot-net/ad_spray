@@ -11,6 +11,7 @@ Directory structure:
     ├── state.json          # Mutable state (current_password_index, skipped_*, etc.)
     ├── attempts.jsonl      # Append-only JSON Lines
     ├── valid_creds.txt     # Quick access to valid credentials
+    ├── spray_log.txt       # Detailed spray output log
     └── meta.json           # Cached metadata for fast listing
 """
 
@@ -282,6 +283,10 @@ class SessionStore:
     @property
     def valid_creds_path(self) -> Path:
         return self.session_dir / 'valid_creds.txt'
+
+    @property
+    def log_path(self) -> Path:
+        return self.session_dir / 'spray_log.txt'
 
     @property
     def meta_path(self) -> Path:
