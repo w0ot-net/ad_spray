@@ -558,17 +558,20 @@ class SprayEngine:
         self._save_session()
 
         # Sleep in chunks so we can respond to interrupts and update status
-        remaining = sleep_time
-        while remaining > 0 and not self.stopped:
+        # Use monotonic time to track actual elapsed time and avoid drift
+        start_time = time.monotonic()
+        end_time = start_time + sleep_time
+        while not self.stopped:
             self._check_pause()  # Check for pause request
             if self.stopped:
                 break
-            mins = remaining // 60
-            secs = remaining % 60
+            remaining = end_time - time.monotonic()
+            if remaining <= 0:
+                break
+            mins = int(remaining) // 60
+            secs = int(remaining) % 60
             self._update_status_bar(extra=f"Sleeping {mins}m {secs}s")
-            chunk = min(remaining, 1)
-            time.sleep(chunk)
-            remaining -= chunk
+            time.sleep(min(remaining, 1))
 
         if not self.stopped:
             self._print(f"{Colors.ORANGE}[+] Resuming spray...{Colors.NC}", level=1)
