@@ -20,17 +20,17 @@ from .storage import (
 
 
 def generate_session_id(session_path: Path) -> str:
-    """Generate the next sequential session ID (session_1, session_2, etc.)."""
+    """Generate the next sequential session ID (1, 2, 3, etc.)."""
     session_path.mkdir(parents=True, exist_ok=True)
 
     # Find existing session numbers
     existing_nums = set()
     for entry in session_path.iterdir():
-        if entry.is_dir() and entry.name.startswith("session_"):
+        if entry.is_dir():
             try:
-                num = int(entry.name.split("_", 1)[1])
+                num = int(entry.name)
                 existing_nums.add(num)
-            except (ValueError, IndexError):
+            except ValueError:
                 pass
 
     # Find next available number
@@ -38,7 +38,31 @@ def generate_session_id(session_path: Path) -> str:
     while next_num in existing_nums:
         next_num += 1
 
-    return f"session_{next_num}"
+    return str(next_num)
+
+
+def resolve_session_id(session_path: Path, identifier: str) -> Optional[str]:
+    """
+    Resolve a session identifier to an actual session ID.
+
+    Args:
+        session_path: Path to session storage
+        identifier: Can be a numeric ID ("1") or a session name ("Q1 Audit")
+
+    Returns:
+        The session ID if found, None otherwise
+    """
+    # First, check if it's a direct session ID (directory exists)
+    if (session_path / identifier).is_dir():
+        return identifier
+
+    # Otherwise, search by name
+    manager = SessionManager(session_path)
+    for session in manager.list_sessions():
+        if session.name and session.name == identifier:
+            return session.session_id
+
+    return None
 
 
 def create_session(

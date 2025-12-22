@@ -29,6 +29,7 @@ from .session import (
     fetch_policy_only,
     list_sessions,
     load_session,
+    resolve_session_id,
     save_session,
 )
 
@@ -140,6 +141,13 @@ def cmd_spray(args) -> int:
             if not session_id:
                 print(f"{Colors.ORANGE}[!] No sessions available.{Colors.NC}", file=sys.stderr)
                 return 1
+        else:
+            # Resolve by ID or name
+            resolved = resolve_session_id(session_path, session_id)
+            if not resolved:
+                print(f"{Colors.RED}[!] Session not found: {session_id}{Colors.NC}", file=sys.stderr)
+                return 1
+            session_id = resolved
 
         try:
             session = load_session(session_path, session_id)
@@ -168,6 +176,13 @@ def cmd_spray(args) -> int:
             if not session_id:
                 print(f"{Colors.ORANGE}[!] No incomplete sessions to resume.{Colors.NC}", file=sys.stderr)
                 return 1
+        else:
+            # Resolve by ID or name
+            resolved = resolve_session_id(session_path, session_id)
+            if not resolved:
+                print(f"{Colors.RED}[!] Session not found: {session_id}{Colors.NC}", file=sys.stderr)
+                return 1
+            session_id = resolved
 
         try:
             session = load_session(session_path, session_id)
@@ -469,21 +484,29 @@ def cmd_sessions(args) -> int:
 def cmd_delete(args) -> int:
     """Delete a session."""
     session_path = Path(args.session_path)
-    if delete_session(session_path, args.session_id):
-        print(f"{Colors.GREEN}[+] Deleted session: {args.session_id}{Colors.NC}", file=sys.stderr)
+    session_id = resolve_session_id(session_path, args.session_id)
+    if not session_id:
+        print(f"{Colors.RED}[!] Session not found: {args.session_id}{Colors.NC}", file=sys.stderr)
+        return 1
+    if delete_session(session_path, session_id):
+        print(f"{Colors.GREEN}[+] Deleted session: {session_id}{Colors.NC}", file=sys.stderr)
         return 0
     else:
-        print(f"{Colors.RED}[!] Session not found: {args.session_id}{Colors.NC}", file=sys.stderr)
+        print(f"{Colors.RED}[!] Failed to delete session: {session_id}{Colors.NC}", file=sys.stderr)
         return 1
 
 
 def cmd_export(args) -> int:
     """Export session results."""
     session_path = Path(args.session_path)
-    try:
-        session = load_session(session_path, args.session_id)
-    except FileNotFoundError:
+    session_id = resolve_session_id(session_path, args.session_id)
+    if not session_id:
         print(f"{Colors.RED}[!] Session not found: {args.session_id}{Colors.NC}", file=sys.stderr)
+        return 1
+    try:
+        session = load_session(session_path, session_id)
+    except FileNotFoundError:
+        print(f"{Colors.RED}[!] Session not found: {session_id}{Colors.NC}", file=sys.stderr)
         return 1
 
     if args.format == "json":
@@ -528,14 +551,15 @@ Examples:
   %(prog)s -d 10.0.0.1 -w CORP --users users.txt --passwords pwds.txt \\
       --lockout-threshold 3 --lockout-window 15 --min-length 10 --complexity
 
-  # Resume existing spray (with session ID)
-  %(prog)s --resume session_1
+  # Resume existing spray (by ID or name)
+  %(prog)s --resume 1
+  %(prog)s --resume "Q1 Audit"
 
   # Resume (interactive session selection)
   %(prog)s --resume
 
   # Get credentials from a session
-  %(prog)s --get-creds session_1
+  %(prog)s --get-creds 1
 
   # Get credentials (interactive session selection)
   %(prog)s --get-creds
