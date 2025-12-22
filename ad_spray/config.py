@@ -159,8 +159,11 @@ def merge_config_with_args(config: Dict[str, Any], args: argparse.Namespace) -> 
         # We check against None for optional args and check hasattr for safety
         if hasattr(args, arg_key):
             current_value = getattr(args, arg_key)
-            # If CLI provided a value (not None and not the argparse default), keep it
+            # If CLI provided a value (not None and not the argparse default), keep it.
             if current_value is not None:
+                if isinstance(current_value, bool) and not current_value and config_value:
+                    setattr(args, arg_key, config_value)
+                # Preserve explicit CLI values (including False) unless config is True.
                 continue
 
         setattr(args, arg_key, config_value)

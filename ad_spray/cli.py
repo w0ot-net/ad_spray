@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .config import load_config, generate_config_file
+from .config import load_config, generate_config_file, merge_config_with_args
 from .constants import (
     Colors,
     DEFAULT_SESSION_PATH,
@@ -77,6 +77,35 @@ def prompt_session_selection(session_path: Path, filter_completed: bool = None) 
             return None
 
 
+def build_password_policy(args, ad_policy) -> PasswordPolicy:
+    """Build the final password policy from args and optional AD policy."""
+    use_manual_lockout_duration = getattr(args, 'manual_lockout_duration', False)
+    lockout_duration_minutes = (
+        args.lockout_window if use_manual_lockout_duration and isinstance(args.lockout_window, int) else 30
+    )
+
+    return PasswordPolicy(
+        lockout_threshold=(
+            ad_policy.lockout_threshold if args.lockout_threshold == 'auto' and ad_policy
+            else (args.lockout_threshold if isinstance(args.lockout_threshold, int) else 5)
+        ),
+        lockout_duration_minutes=lockout_duration_minutes,
+        lockout_observation_window_minutes=(
+            ad_policy.lockout_observation_window_minutes if args.lockout_window == 'auto' and ad_policy
+            else (args.lockout_window if isinstance(args.lockout_window, int) else 30)
+        ),
+        min_password_length=(
+            ad_policy.min_password_length if args.min_length == 'auto' and ad_policy
+            else (args.min_length if isinstance(args.min_length, int) else 0)
+        ),
+        password_history_length=0,
+        complexity_enabled=(
+            ad_policy.complexity_enabled if args.complexity == 'auto' and ad_policy
+            else (args.complexity if isinstance(args.complexity, bool) else False)
+        ),
+    )
+
+
 def cmd_spray(args) -> int:
     """Execute a new spray or resume an existing one."""
     session_path = Path(args.session_path)
@@ -100,19 +129,7 @@ def cmd_spray(args) -> int:
         if not hasattr(args, key):
             setattr(args, key, None)
 
-    # Apply config values where CLI didn't override
-    for key, value in config_values.items():
-        if value is not None:
-            arg_key = key
-            # Handle key name differences
-            if key == 'passwords_file':
-                arg_key = 'spray_passwords'
-
-            current = getattr(args, arg_key, None)
-            # Only apply config if CLI arg wasn't provided
-            # For booleans, we need special handling since False is a valid value
-            if current is None or (isinstance(current, bool) and not current and value):
-                setattr(args, arg_key, value)
+    args = merge_config_with_args(config_values, args)
 
     # Handle --get-creds mode (just show credentials and exit)
     if getattr(args, 'get_creds', None) is not None:
@@ -288,26 +305,7 @@ def cmd_spray(args) -> int:
                         ad_policy = None
 
                 # Build final policy (mix of auto and manual)
-                policy = PasswordPolicy(
-                    lockout_threshold=(
-                        ad_policy.lockout_threshold if args.lockout_threshold == 'auto' and ad_policy
-                        else (args.lockout_threshold if isinstance(args.lockout_threshold, int) else 5)
-                    ),
-                    lockout_duration_minutes=30,
-                    lockout_observation_window_minutes=(
-                        ad_policy.lockout_observation_window_minutes if args.lockout_window == 'auto' and ad_policy
-                        else (args.lockout_window if isinstance(args.lockout_window, int) else 30)
-                    ),
-                    min_password_length=(
-                        ad_policy.min_password_length if args.min_length == 'auto' and ad_policy
-                        else (args.min_length if isinstance(args.min_length, int) else 0)
-                    ),
-                    password_history_length=0,
-                    complexity_enabled=(
-                        ad_policy.complexity_enabled if args.complexity == 'auto' and ad_policy
-                        else (args.complexity if isinstance(args.complexity, bool) else False)
-                    ),
-                )
+                policy = build_password_policy(args, ad_policy)
 
             except Exception as e:
                 print(f"{Colors.RED}[!] Failed to connect to AD: {e}{Colors.NC}", file=sys.stderr)
@@ -324,14 +322,8 @@ def cmd_spray(args) -> int:
             print(f"{Colors.GREEN}[+] Loaded {len(users)} users from file{Colors.NC}", file=sys.stderr)
             print(f"{Colors.ORANGE}[+] No AD creds - using manual policy settings{Colors.NC}", file=sys.stderr)
 
-            policy = PasswordPolicy(
-                lockout_threshold=args.lockout_threshold if isinstance(args.lockout_threshold, int) else 5,
-                lockout_duration_minutes=args.lockout_window if isinstance(args.lockout_window, int) else 30,
-                lockout_observation_window_minutes=args.lockout_window if isinstance(args.lockout_window, int) else 30,
-                min_password_length=args.min_length if isinstance(args.min_length, int) else 0,
-                password_history_length=0,
-                complexity_enabled=args.complexity if isinstance(args.complexity, bool) else False,
-            )
+            args.manual_lockout_duration = True
+            policy = build_password_policy(args, ad_policy=None)
 
             print(f"{Colors.BLUE}[+]   Lockout: {policy.lockout_threshold} / {policy.lockout_observation_window_minutes}min{Colors.NC}", file=sys.stderr)
             print(f"{Colors.BLUE}[+]   Min length: {policy.min_password_length}{Colors.NC}", file=sys.stderr)
