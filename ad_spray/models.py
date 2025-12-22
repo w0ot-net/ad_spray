@@ -1,7 +1,11 @@
 """Data models for spray sessions."""
 
 from dataclasses import dataclass, field, asdict
-from typing import Any, Dict, List, Optional, Set
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .storage import SessionStore
 
 from .scheduling import Schedule
 
@@ -60,12 +64,18 @@ class SprayConfig:
     user_as_pass: bool
     created_at: str
     completed: bool = False
+    name: Optional[str] = None  # Human-readable session name
+    tags: List[str] = field(default_factory=list)  # Session tags for organization
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "SprayConfig":
+        # Handle missing fields for backward compatibility
+        d = d.copy()
+        d.setdefault('name', None)
+        d.setdefault('tags', [])
         return cls(**d)
 
 

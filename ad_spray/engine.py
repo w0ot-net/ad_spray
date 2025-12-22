@@ -25,6 +25,7 @@ from .ldap import check_auth
 from .models import Attempt, SpraySession
 from .policy import password_meets_policy, password_contains_username
 from .scheduling import TimeVerifier, format_schedule_display
+from .storage import SessionStore, AttemptRecord
 
 
 class SprayEngine:
@@ -45,6 +46,9 @@ class SprayEngine:
         self.stopped = False
         self.consecutive_lockouts = 0
         self._pause_requested = False  # Flag for async signal handler
+
+        # Session store for efficient I/O
+        self._store = SessionStore(session_path, session.config.session_id)
 
         # Status bar tracking
         self._is_tty = sys.stderr.isatty() and sys.stdin.isatty()
@@ -241,7 +245,8 @@ class SprayEngine:
         save_session(self.session, self.session_path)
 
     def _write_success(self, username: str, password: str, status: str):
-        """Write successful credential to output file."""
+        """Write successful credential to custom output file (if configured)."""
+        # Note: valid_creds.txt in session dir is now handled by storage module
         output_file = self.session.config.output_file
         if not output_file:
             return
@@ -576,13 +581,23 @@ class SprayEngine:
         )
 
         status = self._check_credential(username, password)
+        timestamp = datetime.now().isoformat()
 
-        # Record the attempt
+        # Record the attempt using append-only storage (fast)
+        attempt_record = AttemptRecord(
+            username=username,
+            password=password,
+            status=status,
+            timestamp=timestamp,
+        )
+        self._store.append_attempt(attempt_record)
+
+        # Also keep in memory for stats (lightweight reference)
         attempt = Attempt(
             username=username,
             password=password,
             status=status,
-            timestamp=datetime.now().isoformat(),
+            timestamp=timestamp,
         )
         self.session.attempts.append(attempt)
 

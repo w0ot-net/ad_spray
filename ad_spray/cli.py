@@ -273,9 +273,13 @@ def cmd_spray(args) -> int:
             port=args.port,
             output_file=args.output or 'valid_creds.txt',
             verbose=args.verbose or 3,
+            name=getattr(args, 'name', None),
+            tags=getattr(args, 'tag', None) or [],
+            session_path=session_path,
         )
-        save_session(session, session_path)
-        print(f"{Colors.GREEN}[+] Created session: {session.config.session_id}{Colors.NC}", file=sys.stderr)
+        # Note: create_session now handles saving with new storage format
+        session_name = session.config.name or session.config.session_id
+        print(f"{Colors.GREEN}[+] Created session: {session_name} ({session.config.session_id}){Colors.NC}", file=sys.stderr)
 
     # Set up time verification
     force_system_time = getattr(args, 'force_system_time', False)
@@ -331,33 +335,54 @@ def cmd_sessions(args) -> int:
         print(f"{Colors.ORANGE}[!] No sessions found.{Colors.NC}", file=sys.stderr)
         return 0
 
-    # Header
-    print(f"{Colors.BLUE}{'─' * 100}{Colors.NC}")
-    print(
-        f"{Colors.BLUE}│{Colors.NC} {Colors.ORANGE}{'Done':^4}{Colors.NC} "
-        f"{Colors.BLUE}│{Colors.NC} {Colors.ORANGE}{'Session':^32}{Colors.NC} "
-        f"{Colors.BLUE}│{Colors.NC} {Colors.ORANGE}{'Workgroup':^12}{Colors.NC} "
-        f"{Colors.BLUE}│{Colors.NC} {Colors.ORANGE}{'DC Host':^15}{Colors.NC} "
-        f"{Colors.BLUE}│{Colors.NC} {Colors.ORANGE}{'Valid':^6}{Colors.NC} "
-        f"{Colors.BLUE}│{Colors.NC} {Colors.ORANGE}{'Created':^16}{Colors.NC} "
-        f"{Colors.BLUE}│{Colors.NC}"
-    )
-    print(f"{Colors.BLUE}{'─' * 100}{Colors.NC}")
+    # Print each session in a readable format
+    print(f"\n{Colors.BLUE}{'═' * 80}{Colors.NC}")
+    print(f"{Colors.ORANGE} Sessions ({len(sessions)} total){Colors.NC}")
+    print(f"{Colors.BLUE}{'═' * 80}{Colors.NC}\n")
 
     for s in sessions:
-        done_str = f"{Colors.GREEN}Yes{Colors.NC}" if s["completed"] else f"{Colors.RED}No{Colors.NC}"
-        created = s["created_at"][:16].replace("T", " ")
-        print(
-            f"{Colors.BLUE}│{Colors.NC} {done_str:^13} "
-            f"{Colors.BLUE}│{Colors.NC} {s['session_id']:^32} "
-            f"{Colors.BLUE}│{Colors.NC} {s['workgroup']:^12} "
-            f"{Colors.BLUE}│{Colors.NC} {s['dc_host']:^15} "
-            f"{Colors.BLUE}│{Colors.NC} {s['valid']:^6} "
-            f"{Colors.BLUE}│{Colors.NC} {created:^16} "
-            f"{Colors.BLUE}│{Colors.NC}"
-        )
+        # Status indicator
+        if s["completed"]:
+            status = f"{Colors.GREEN}✓ Completed{Colors.NC}"
+        else:
+            status = f"{Colors.ORANGE}○ In Progress{Colors.NC}"
 
-    print(f"{Colors.BLUE}{'─' * 100}{Colors.NC}")
+        # Session identifier (name or ID)
+        name_display = s.get('name') or s['session_id']
+
+        print(f"  {Colors.LBLUE}{name_display}{Colors.NC}")
+
+        # Show ID if we have a name
+        if s.get('name'):
+            print(f"    ID: {s['session_id']}")
+
+        # Tags
+        tags = s.get('tags', [])
+        if tags:
+            tag_str = ', '.join(f"[{t}]" for t in tags)
+            print(f"    Tags: {tag_str}")
+
+        # Target info
+        print(f"    Target: {s['workgroup']}@{s['dc_host']}")
+
+        # Progress
+        users = s.get('users', 0)
+        passwords = s.get('passwords', 0)
+        attempts = s.get('total', 0)
+        valid = s.get('valid', 0)
+        locked = s.get('locked', 0)
+
+        print(f"    Progress: {attempts:,} attempts ({users:,} users × {passwords:,} passwords)")
+        print(f"    Results: {Colors.GREEN}{valid} valid{Colors.NC}, {Colors.RED}{locked} locked{Colors.NC}")
+
+        # Timestamps
+        created = s["created_at"][:19].replace("T", " ")
+        print(f"    Created: {created}")
+        print(f"    Status: {status}")
+
+        print()
+
+    print(f"{Colors.BLUE}{'═' * 80}{Colors.NC}\n")
     return 0
 
 
@@ -472,6 +497,10 @@ Examples:
                               help="Attempt reduction during business hours (default: 3)")
     spray_parser.add_argument("--force-system-time", action="store_true",
                               help="Use system clock instead of external time verification (not recommended)")
+    # Session naming options
+    spray_parser.add_argument("--name", help="Human-readable session name (e.g., 'Q1 External Audit')")
+    spray_parser.add_argument("--tag", action="append", dest="tag",
+                              help="Add tag to session (can be used multiple times)")
     spray_parser.set_defaults(func=cmd_spray)
 
     # Sessions subcommand
