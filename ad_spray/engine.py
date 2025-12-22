@@ -112,7 +112,7 @@ class SprayEngine:
         except Exception:
             pass  # Best effort cleanup
 
-    def _update_status_bar(self, password: str = "", extra: str = ""):
+    def _update_status_bar(self, credential: str = "", extra: str = ""):
         """Update the status bar at bottom of terminal."""
         if not self._status_bar_active:
             return
@@ -134,8 +134,8 @@ class SprayEngine:
             # Build status line
             if extra:
                 status = f" {Colors.LBLUE}[{extra}]{Colors.NC} | {eta_str}{schedule_str}"
-            elif password:
-                status = f" {Colors.LBLUE}Password:{Colors.NC} {password} | {eta_str}{schedule_str}"
+            elif credential:
+                status = f" {Colors.LBLUE}Testing:{Colors.NC} {credential} | {eta_str}{schedule_str}"
             else:
                 status = f" {eta_str}{schedule_str}"
 
@@ -477,7 +477,7 @@ class SprayEngine:
                     return False
 
                 self._current_password_num = 1
-                self._update_status_bar(password="<username>")
+                self._update_status_bar(credential="<user>:<user>")
                 self._print(f"{Colors.ORANGE}[+] Trying username as password...{Colors.NC}", level=2, screen=False)
                 for username in self.session.users:
                     self._check_pause()  # Check for pause request
@@ -519,7 +519,6 @@ class SprayEngine:
 
                 # Update progress tracking
                 self._current_password_num = pwd_idx + 1 + (1 if config.user_as_pass else 0)
-                self._update_status_bar(password=password)
 
                 self._print(f"{Colors.ORANGE}[+] Spraying password:{Colors.NC} {password}", level=2, screen=False)
 
@@ -614,6 +613,9 @@ class SprayEngine:
 
     def _spray_single(self, username: str, password: str):
         """Spray a single credential."""
+        # Update status bar with current credential being tested
+        self._update_status_bar(credential=f"{username}:{password}")
+
         # Log the attempt (log only)
         self._print(
             f"{Colors.BLUE}[+] Trying:{Colors.NC} {username}:{password} {Colors.BLUE}...{Colors.NC}",
