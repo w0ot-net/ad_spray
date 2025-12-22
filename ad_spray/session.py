@@ -78,7 +78,6 @@ def create_session(
     port: Optional[int] = None,
     output_file: Optional[str] = None,
     verbose: int = 3,
-    tags: Optional[List[str]] = None,
     session_path: Path = DEFAULT_SESSION_PATH,
 ) -> SpraySession:
     """Create a new spray session with the new storage format."""
@@ -95,7 +94,6 @@ def create_session(
         user_as_pass=user_as_pass,
         created_at=datetime.now().isoformat(),
         name=name,
-        tags=tags or [],
     )
 
     # Create session using new storage format
@@ -213,7 +211,6 @@ def list_sessions(session_path: Path) -> List[Dict[str, Any]]:
         {
             "session_id": s.session_id,
             "name": s.name,
-            "tags": s.tags,
             "workgroup": s.workgroup,
             "dc_host": s.dc_host,
             "completed": s.completed,

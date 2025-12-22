@@ -65,7 +65,6 @@ class SprayConfig:
     created_at: str
     name: str  # Human-readable session name (required)
     completed: bool = False
-    tags: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -370,7 +370,6 @@ def cmd_spray(args) -> int:
             output_file=args.output or 'valid_creds.txt',
             verbose=args.verbose or 3,
             name=session_name,
-            tags=getattr(args, 'tag', None) or [],
             session_path=session_path,
         )
         # Note: create_session now handles saving with new storage format
@@ -450,12 +449,6 @@ def cmd_sessions(args) -> int:
         # Show ID if we have a name
         if s.get('name'):
             print(f"    ID: {s['session_id']}")
-
-        # Tags
-        tags = s.get('tags', [])
-        if tags:
-            tag_str = ', '.join(f"[{t}]" for t in tags)
-            print(f"    Tags: {tag_str}")
 
         # Target info
         print(f"    Target: {s['workgroup']}@{s['dc_host']}")
@@ -605,8 +598,6 @@ Examples:
                               help="Use system clock instead of external time verification (not recommended)")
     # Session naming options
     spray_parser.add_argument("--name", help="Human-readable session name (e.g., 'Q1 External Audit')")
-    spray_parser.add_argument("--tag", action="append", dest="tag",
-                              help="Add tag to session (can be used multiple times)")
     spray_parser.set_defaults(func=cmd_spray)
 
     # Sessions subcommand

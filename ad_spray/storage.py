@@ -202,7 +202,6 @@ class SessionMetadata:
     """Cached metadata for fast session listing."""
     session_id: str
     name: Optional[str]
-    tags: List[str]
     workgroup: str
     dc_host: str
     created_at: str
@@ -415,7 +414,6 @@ class SessionStore:
         meta = SessionMetadata(
             session_id=self.session_id,
             name=config.get('name'),
-            tags=config.get('tags', []),
             workgroup=config.get('workgroup', ''),
             dc_host=config.get('dc_host', ''),
             created_at=config.get('created_at', ''),
