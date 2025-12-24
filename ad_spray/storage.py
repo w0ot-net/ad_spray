@@ -4,7 +4,7 @@ Session storage with separate files for efficient I/O.
 Directory structure:
     ~/.adspray/sessions/{session_id}/
     ├── config.json         # SprayConfig (immutable after creation)
-    ├── policy.json         # PasswordPolicy (immutable)
+    ├── policy.json         # DomainPolicy (immutable)
     ├── schedule.json       # Schedule (immutable)
     ├── users.txt           # One username per line
     ├── passwords.txt       # One password per line

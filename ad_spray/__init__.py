@@ -8,7 +8,7 @@ to test credentials against Active Directory.
 __version__ = "1.0.0"
 
 from .constants import Colors, DEFAULT_SESSION_PATH
-from .models import PasswordPolicy, Attempt, SprayConfig, SpraySession
+from .models import DomainPolicy, Attempt, SprayConfig, SpraySession
 from .scheduling import (
     TimeVerifier,
     TimeVerificationError,
@@ -40,7 +40,7 @@ __all__ = [
     "Colors",
     "DEFAULT_SESSION_PATH",
     # Models
-    "PasswordPolicy",
+    "DomainPolicy",
     "Attempt",
     "SprayConfig",
     "SpraySession",

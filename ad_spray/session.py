@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from .constants import Colors, DEFAULT_SESSION_PATH
 from .ldap import ADConnection
-from .models import PasswordPolicy, SprayConfig, SpraySession
+from .models import DomainPolicy, SprayConfig, SpraySession
 from .scheduling import Schedule
 from .storage import (
     SessionStore,
@@ -70,7 +70,7 @@ def create_session(
     workgroup: str,
     users: List[str],
     passwords: List[str],
-    policy: PasswordPolicy,
+    policy: DomainPolicy,
     schedule: Schedule,
     name: str,
     lockout_window: int,
@@ -145,7 +145,7 @@ def load_session(session_path: Path, session_id: str) -> SpraySession:
             raise FileNotFoundError(f"Session not found: {session_id}")
 
     config = SprayConfig.from_dict(store.load_config())
-    policy = PasswordPolicy.from_dict(store.load_policy())
+    policy = DomainPolicy.from_dict(store.load_policy())
     schedule = Schedule.from_dict(store.load_schedule())
     timing = store.load_timing()
     users = store.load_users()
@@ -277,10 +277,10 @@ def fetch_policy(
     use_ssl: bool = False,
     port: Optional[int] = None,
     base_dn: Optional[str] = None,
-) -> PasswordPolicy:
+) -> DomainPolicy:
     """
-    Connect to AD and fetch the lockout policy.
-    Returns PasswordPolicy.
+    Connect to AD and fetch the domain policy.
+    Returns DomainPolicy with lockout and password settings.
     """
     with ADConnection(
         dc_host=dc_host,
@@ -292,7 +292,7 @@ def fetch_policy(
         port=port,
     ) as ad:
         policy_dict = ad.get_lockout_policy()
-        return PasswordPolicy.from_dict(policy_dict)
+        return DomainPolicy.from_dict(policy_dict)
 
 
 def fetch_users(

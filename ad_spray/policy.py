@@ -2,12 +2,12 @@
 
 from typing import Tuple, Optional
 
-from .models import PasswordPolicy
+from .models import DomainPolicy
 
 
 def password_meets_policy(
     password: str,
-    policy: PasswordPolicy,
+    policy: DomainPolicy,
     username: str = None
 ) -> Tuple[bool, Optional[str]]:
     """
@@ -53,7 +53,7 @@ def password_meets_policy(
 def password_contains_username(
     password: str,
     username: str,
-    policy: PasswordPolicy
+    policy: DomainPolicy
 ) -> bool:
     """
     Check if password contains username (case-insensitive).

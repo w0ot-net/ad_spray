@@ -11,14 +11,22 @@ from .scheduling import Schedule
 
 
 @dataclass
-class PasswordPolicy:
-    """Password filtering policy."""
+class DomainPolicy:
+    """Domain lockout and password policy from AD."""
+    # Lockout settings
+    lockout_threshold: int  # 0 = no lockout
+    lockout_duration_minutes: int
+    lockout_observation_window_minutes: int
+    # Password settings
     min_password_length: int
     complexity_enabled: bool  # Windows password complexity rules
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "PasswordPolicy":
+    def from_dict(cls, d: Dict[str, Any]) -> "DomainPolicy":
         return cls(
+            lockout_threshold=d.get("lockout_threshold", 0),
+            lockout_duration_minutes=d.get("lockout_duration_minutes", 30),
+            lockout_observation_window_minutes=d.get("lockout_observation_window_minutes", 30),
             min_password_length=d.get("min_password_length", 0),
             complexity_enabled=d.get("complexity_enabled", False),
         )
@@ -70,7 +78,7 @@ class SprayConfig:
 class SpraySession:
     """A complete spray session with config, attempts, and policy."""
     config: SprayConfig
-    policy: PasswordPolicy
+    policy: DomainPolicy
     schedule: Schedule = field(default_factory=Schedule.disabled)
     users: List[str] = field(default_factory=list)
     passwords: List[str] = field(default_factory=list)

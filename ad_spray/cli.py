@@ -14,7 +14,7 @@ from .constants import (
     VALID_CREDENTIAL_STATUSES,
 )
 from .engine import SprayEngine
-from .models import PasswordPolicy
+from .models import DomainPolicy
 from .scheduling import (
     BusinessHoursWindow,
     DAYS_OF_WEEK,
@@ -78,9 +78,12 @@ def prompt_session_selection(session_path: Path, filter_completed: bool = None) 
             return None
 
 
-def build_password_policy(args) -> PasswordPolicy:
-    """Build the password policy from args."""
-    return PasswordPolicy(
+def build_domain_policy(args) -> DomainPolicy:
+    """Build a DomainPolicy for password filtering (lockout fields unused)."""
+    return DomainPolicy(
+        lockout_threshold=0,  # Not used - timing is explicit via --attempts
+        lockout_duration_minutes=0,
+        lockout_observation_window_minutes=0,
         min_password_length=args.min_length if args.min_length is not None else 0,
         complexity_enabled=args.complexity if args.complexity is not None else False,
     )
@@ -243,7 +246,7 @@ def cmd_spray(args) -> int:
                 return 1
 
         # Build policy from args
-        policy = build_password_policy(args)
+        policy = build_domain_policy(args)
 
         # Print timing info
         print(f"{Colors.BLUE}[+] Timing: {args.attempts} attempts / {args.lockout_window}min window{Colors.NC}", file=sys.stderr)
