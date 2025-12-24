@@ -159,11 +159,11 @@ class SprayEngine:
         if passwords_remaining <= 0:
             return "ETA: completing..."
 
-        safe_attempts = self.session.get_safe_attempts_per_window(apply_schedule=False)  # Base for ETA
+        safe_attempts = self.session.attempts_allowed  # Base for ETA (non-business hours)
         sleep_time = self.session.get_sleep_time_seconds()
 
         # Calculate remaining sleep cycles
-        if safe_attempts >= 100 or sleep_time == 0:
+        if safe_attempts <= 0 or sleep_time == 0:
             # No lockout policy - estimate based on elapsed time
             elapsed = (datetime.now() - self._start_time).total_seconds()
             if self._current_password_num > 0:
@@ -309,7 +309,6 @@ class SprayEngine:
         while not self.stopped:
             # Use verified time for schedule checks
             safe_attempts = self.session.get_safe_attempts_per_window(
-                apply_schedule=True,
                 time_verifier=self.time_verifier
             )
 
@@ -380,17 +379,13 @@ class SprayEngine:
                 self._print(f"{Colors.BLUE}[+]{Colors.NC}{line}", level=1, screen=False)
             self._print(f"{Colors.BLUE}[+] ---------------{Colors.NC}", level=1, screen=False)
 
-        safe_attempts = self.session.get_safe_attempts_per_window(apply_schedule=False)  # Base for display
+        safe_attempts = self.session.attempts_allowed  # Base for display (non-business hours)
         sleep_time = self.session.get_sleep_time_seconds()
 
-        # Check if spraying is even possible with this lockout policy
+        # Check if spraying is even possible
         if safe_attempts <= 0:
             self._print(
-                f"{Colors.RED}[!] Cannot spray safely: lockout threshold is {policy.lockout_threshold}{Colors.NC}",
-                level=1
-            )
-            self._print(
-                f"{Colors.RED}[!] Any failed attempt would lock accounts. Aborting.{Colors.NC}",
+                f"{Colors.RED}[!] Cannot spray: attempts_allowed is 0{Colors.NC}",
                 level=1
             )
             return False
@@ -571,11 +566,8 @@ class SprayEngine:
         """Check if we should sleep before the next password."""
         # Get current safe attempts (schedule-aware with verified time)
         safe_attempts = self.session.get_safe_attempts_per_window(
-            apply_schedule=True,
             time_verifier=self.time_verifier
         )
-        if safe_attempts >= 100:  # No lockout policy
-            return False
         if safe_attempts <= 0:  # Should be paused entirely (handled elsewhere)
             return False
         return self.session.attempts_since_sleep >= safe_attempts

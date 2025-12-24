@@ -264,6 +264,10 @@ class SessionStore:
         return self.session_dir / 'schedule.json'
 
     @property
+    def timing_path(self) -> Path:
+        return self.session_dir / 'timing.json'
+
+    @property
     def users_path(self) -> Path:
         return self.session_dir / 'users.txt'
 
@@ -302,6 +306,7 @@ class SessionStore:
         schedule: Dict[str, Any],
         users: List[str],
         passwords: List[str],
+        timing: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Create a new session with all initial files."""
         self.session_dir.mkdir(parents=True, exist_ok=True)
@@ -311,6 +316,8 @@ class SessionStore:
             atomic_write_json(self.config_path, config)
             atomic_write_json(self.policy_path, policy)
             atomic_write_json(self.schedule_path, schedule)
+            if timing:
+                atomic_write_json(self.timing_path, timing)
 
             # Write user/password lists
             atomic_write_lines(self.users_path, users)
@@ -342,6 +349,18 @@ class SessionStore:
     def load_schedule(self) -> Dict[str, Any]:
         """Load schedule."""
         with open(self.schedule_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+    def load_timing(self) -> Dict[str, Any]:
+        """Load timing settings."""
+        if not self.timing_path.exists():
+            # Default timing for old sessions
+            return {
+                "lockout_window": 30,
+                "attempts_allowed": 1,
+                "attempts_allowed_business": 0,
+            }
+        with open(self.timing_path, 'r', encoding='utf-8') as f:
             return json.load(f)
 
     def load_users(self) -> List[str]:

@@ -22,13 +22,9 @@ def load_config(config_path: str) -> Dict[str, Any]:
     if config.has_section('target'):
         result['dc'] = config.get('target', 'dc', fallback=None)
         result['workgroup'] = config.get('target', 'workgroup', fallback=None)
-        result['username'] = config.get('target', 'username', fallback=None)
-        result['password'] = config.get('target', 'password', fallback=None)
         result['ssl'] = config.getboolean('target', 'ssl', fallback=False)
         port_str = config.get('target', 'port', fallback='')
         result['port'] = int(port_str) if port_str.strip() else None
-        base_dn = config.get('target', 'base_dn', fallback='')
-        result['base_dn'] = base_dn if base_dn.strip() else None
 
     # [spray] section
     if config.has_section('spray'):
@@ -38,23 +34,33 @@ def load_config(config_path: str) -> Dict[str, Any]:
         result['userpass'] = config.getboolean('spray', 'userpass', fallback=False)
         result['verbose'] = config.getint('spray', 'verbose', fallback=3)
 
-    # [policy] section - support 'auto' keyword
-    if config.has_section('policy'):
-        for key in ['lockout_threshold', 'lockout_window', 'min_length']:
-            val = config.get('policy', key, fallback='auto')
-            result[key] = 'auto' if val.lower() == 'auto' else int(val)
+    # [timing] section
+    if config.has_section('timing'):
+        window = config.get('timing', 'lockout_window', fallback='')
+        if window.strip():
+            result['lockout_window'] = int(window)
 
-        complexity_val = config.get('policy', 'complexity', fallback='auto')
-        if complexity_val.lower() == 'auto':
-            result['complexity'] = 'auto'
-        else:
-            result['complexity'] = config.getboolean('policy', 'complexity', fallback=False)
+        attempts = config.get('timing', 'attempts', fallback='')
+        if attempts.strip():
+            result['attempts'] = int(attempts)
+
+        attempts_business = config.get('timing', 'attempts_business', fallback='')
+        if attempts_business.strip():
+            result['attempts_business'] = int(attempts_business)
+
+    # [filter] section (password filtering)
+    if config.has_section('filter'):
+        min_len = config.get('filter', 'min_length', fallback='')
+        if min_len.strip():
+            result['min_length'] = int(min_len)
+
+        if config.has_option('filter', 'complexity'):
+            result['complexity'] = config.getboolean('filter', 'complexity')
 
     # [schedule] section
     if config.has_section('schedule'):
         timezone = config.get('schedule', 'timezone', fallback='')
         result['timezone'] = timezone if timezone.strip() else None
-        result['business_hours_reduction'] = config.getint('schedule', 'business_hours_reduction', fallback=3)
         result['force_system_time'] = config.getboolean('schedule', 'force_system_time', fallback=False)
 
         result['daily_hours'] = {}
@@ -72,9 +78,6 @@ def merge_config_with_args(config: Dict[str, Any], args: argparse.Namespace) -> 
     # Map of config keys to arg names (where they differ)
     key_mapping = {
         'passwords_file': 'spray_passwords',
-        'lockout_threshold': 'lockout_threshold',
-        'lockout_window': 'lockout_window',
-        'min_length': 'min_length',
     }
 
     for config_key, config_value in config.items():

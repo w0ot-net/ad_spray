@@ -25,8 +25,8 @@ from .scheduling import (
 from .session import (
     create_session,
     delete_session,
-    fetch_domain_info,
-    fetch_policy_only,
+    fetch_policy,
+    fetch_users,
     list_sessions,
     load_session,
     resolve_session_id,
@@ -78,32 +78,11 @@ def prompt_session_selection(session_path: Path, filter_completed: bool = None) 
             return None
 
 
-def build_password_policy(args, ad_policy) -> PasswordPolicy:
-    """Build the final password policy from args and optional AD policy."""
-    use_manual_lockout_duration = getattr(args, 'manual_lockout_duration', False)
-    lockout_duration_minutes = (
-        args.lockout_window if use_manual_lockout_duration and isinstance(args.lockout_window, int) else 30
-    )
-
+def build_password_policy(args) -> PasswordPolicy:
+    """Build the password policy from args."""
     return PasswordPolicy(
-        lockout_threshold=(
-            ad_policy.lockout_threshold if args.lockout_threshold == 'auto' and ad_policy
-            else (args.lockout_threshold if isinstance(args.lockout_threshold, int) else 5)
-        ),
-        lockout_duration_minutes=lockout_duration_minutes,
-        lockout_observation_window_minutes=(
-            ad_policy.lockout_observation_window_minutes if args.lockout_window == 'auto' and ad_policy
-            else (args.lockout_window if isinstance(args.lockout_window, int) else 30)
-        ),
-        min_password_length=(
-            ad_policy.min_password_length if args.min_length == 'auto' and ad_policy
-            else (args.min_length if isinstance(args.min_length, int) else 0)
-        ),
-        password_history_length=0,
-        complexity_enabled=(
-            ad_policy.complexity_enabled if args.complexity == 'auto' and ad_policy
-            else (args.complexity if isinstance(args.complexity, bool) else False)
-        ),
+        min_password_length=args.min_length if args.min_length is not None else 0,
+        complexity_enabled=args.complexity if args.complexity is not None else False,
     )
 
 
@@ -123,10 +102,10 @@ def cmd_spray(args) -> int:
 
     # Merge config with CLI args (CLI takes precedence)
     # Set defaults for args that might not exist
-    for key in ['dc', 'workgroup', 'username', 'password', 'ssl', 'port', 'base_dn',
+    for key in ['dc', 'workgroup', 'ssl', 'port',
                 'spray_passwords', 'users_file', 'output', 'userpass', 'verbose',
-                'lockout_threshold', 'lockout_window', 'min_length', 'complexity',
-                'timezone', 'business_hours_reduction', 'daily_hours']:
+                'lockout_window', 'attempts', 'attempts_business',
+                'min_length', 'complexity', 'timezone', 'daily_hours']:
         if not hasattr(args, key):
             setattr(args, key, None)
 
@@ -204,36 +183,18 @@ def cmd_spray(args) -> int:
         if not args.spray_passwords:
             print(f"{Colors.RED}[!] Passwords file is required (--passwords){Colors.NC}", file=sys.stderr)
             return 1
-
-        have_creds = args.username and args.password
-
-        # Check for 'auto' settings that require creds
-        # Collect all auto settings for clear error messaging
-        auto_settings = []
-
-        # Check users_file
-        users_auto = args.users_file and str(args.users_file).lower() == 'auto'
-        if users_auto:
-            auto_settings.append('users_file')
-
-        # Check policy settings
-        if args.lockout_threshold == 'auto':
-            auto_settings.append('lockout_threshold')
-        if args.lockout_window == 'auto':
-            auto_settings.append('lockout_window')
-        if args.min_length == 'auto':
-            auto_settings.append('min_length')
-        if args.complexity == 'auto':
-            auto_settings.append('complexity')
-
-        if auto_settings and not have_creds:
-            print(f"{Colors.RED}[!] AD credentials (-u/-p) required for 'auto' settings{Colors.NC}", file=sys.stderr)
-            print(f"{Colors.RED}[!] The following are set to 'auto': {', '.join(auto_settings)}{Colors.NC}", file=sys.stderr)
+        if not args.users_file:
+            print(f"{Colors.RED}[!] Users file is required (--users){Colors.NC}", file=sys.stderr)
             return 1
-
-        # If no users file specified and no creds, that's an error
-        if not args.users_file and not have_creds:
-            print(f"{Colors.RED}[!] Either provide a users file (--users) or AD credentials (-u/-p) for auto-enumeration{Colors.NC}", file=sys.stderr)
+        if args.lockout_window is None:
+            print(f"{Colors.RED}[!] Lockout window is required (--lockout-window){Colors.NC}", file=sys.stderr)
+            return 1
+        if args.attempts is None:
+            print(f"{Colors.RED}[!] Attempts per window is required (--attempts){Colors.NC}", file=sys.stderr)
+            return 1
+        # If timezone is set, require --attempts-business
+        if args.timezone and args.attempts_business is None:
+            print(f"{Colors.RED}[!] --attempts-business is required when using --timezone{Colors.NC}", file=sys.stderr)
             return 1
 
         # Load passwords to spray
@@ -248,6 +209,20 @@ def cmd_spray(args) -> int:
             print(f"{Colors.RED}[!] Passwords file is empty{Colors.NC}", file=sys.stderr)
             return 1
 
+        # Load users
+        try:
+            with open(args.users_file) as f:
+                users = [line.strip() for line in f if line.strip()]
+        except FileNotFoundError:
+            print(f"{Colors.RED}[!] Users file not found: {args.users_file}{Colors.NC}", file=sys.stderr)
+            return 1
+
+        if not users:
+            print(f"{Colors.RED}[!] Users file is empty{Colors.NC}", file=sys.stderr)
+            return 1
+
+        print(f"{Colors.GREEN}[+] Loaded {len(users)} users from file{Colors.NC}", file=sys.stderr)
+
         # Build schedule
         schedule = Schedule.disabled()
         if args.timezone:
@@ -261,92 +236,23 @@ def cmd_spray(args) -> int:
                         daily_hours[day] = BusinessHoursWindow(start=None, end=None, pause_all_day=False)
                 schedule = Schedule(
                     timezone=args.timezone,
-                    business_hours_reduction=args.business_hours_reduction or 3,
                     daily_hours=daily_hours,
                 )
             except Exception as e:
                 print(f"{Colors.RED}[!] Invalid timezone: {args.timezone}: {e}{Colors.NC}", file=sys.stderr)
                 return 1
 
-        # Get users and policy
-        if have_creds:
-            # Fetch from AD as needed
-            try:
-                # Enumerate users from AD if users_file is 'auto' or not specified
-                should_enumerate_users = users_auto or not args.users_file
-                if should_enumerate_users:
-                    # Enumerate users from AD
-                    print(f"{Colors.BLUE}[+] Enumerating users from AD (auto)...{Colors.NC}", file=sys.stderr)
-                    users, ad_policy = fetch_domain_info(
-                        dc_host=args.dc,
-                        username=args.username,
-                        password=args.password,
-                        workgroup=args.workgroup,
-                        use_ssl=args.ssl or False,
-                        port=args.port,
-                        base_dn=args.base_dn,
-                        verbose=args.verbose or 3,
-                    )
-                else:
-                    # Use provided users file
-                    try:
-                        with open(args.users_file) as f:
-                            users = [line.strip() for line in f if line.strip()]
-                    except FileNotFoundError:
-                        print(f"{Colors.RED}[!] Users file not found: {args.users_file}{Colors.NC}", file=sys.stderr)
-                        return 1
-                    print(f"{Colors.GREEN}[+] Loaded {len(users)} users from file{Colors.NC}", file=sys.stderr)
+        # Build policy from args
+        policy = build_password_policy(args)
 
-                    # Check if any policy setting needs to be fetched from AD
-                    policy_auto = (
-                        args.lockout_threshold == 'auto' or
-                        args.lockout_window == 'auto' or
-                        args.min_length == 'auto' or
-                        args.complexity == 'auto'
-                    )
-                    if policy_auto:
-                        # Fetch policy from AD
-                        ad_policy = fetch_policy_only(
-                            dc_host=args.dc,
-                            username=args.username,
-                            password=args.password,
-                            workgroup=args.workgroup,
-                            use_ssl=args.ssl or False,
-                            port=args.port,
-                            base_dn=args.base_dn,
-                            verbose=args.verbose or 3,
-                        )
-                    else:
-                        ad_policy = None
-
-                # Build final policy (mix of auto and manual)
-                policy = build_password_policy(args, ad_policy)
-
-            except Exception as e:
-                print(f"{Colors.RED}[!] Failed to connect to AD: {e}{Colors.NC}", file=sys.stderr)
-                return 1
-        else:
-            # No creds - use users file and manual policy (already validated no 'auto' above)
-            try:
-                with open(args.users_file) as f:
-                    users = [line.strip() for line in f if line.strip()]
-            except FileNotFoundError:
-                print(f"{Colors.RED}[!] Users file not found: {args.users_file}{Colors.NC}", file=sys.stderr)
-                return 1
-
-            print(f"{Colors.GREEN}[+] Loaded {len(users)} users from file{Colors.NC}", file=sys.stderr)
-            print(f"{Colors.ORANGE}[+] No AD creds - using manual policy settings{Colors.NC}", file=sys.stderr)
-
-            args.manual_lockout_duration = True
-            policy = build_password_policy(args, ad_policy=None)
-
-            print(f"{Colors.BLUE}[+]   Lockout: {policy.lockout_threshold} / {policy.lockout_observation_window_minutes}min{Colors.NC}", file=sys.stderr)
-            print(f"{Colors.BLUE}[+]   Min length: {policy.min_password_length}{Colors.NC}", file=sys.stderr)
-            print(f"{Colors.BLUE}[+]   Complexity: {policy.complexity_enabled}{Colors.NC}", file=sys.stderr)
-
-        if not users:
-            print(f"{Colors.RED}[!] No users found{Colors.NC}", file=sys.stderr)
-            return 1
+        # Print timing info
+        print(f"{Colors.BLUE}[+] Timing: {args.attempts} attempts / {args.lockout_window}min window{Colors.NC}", file=sys.stderr)
+        if args.timezone:
+            print(f"{Colors.BLUE}[+] Business hours ({args.timezone}): {args.attempts_business} attempts{Colors.NC}", file=sys.stderr)
+        if policy.min_password_length > 0:
+            print(f"{Colors.BLUE}[+] Min password length: {policy.min_password_length}{Colors.NC}", file=sys.stderr)
+        if policy.complexity_enabled:
+            print(f"{Colors.BLUE}[+] Complexity required: {policy.complexity_enabled}{Colors.NC}", file=sys.stderr)
 
         # Get session name (prompt if not provided)
         session_name = getattr(args, 'name', None)
@@ -364,6 +270,9 @@ def cmd_spray(args) -> int:
             passwords=passwords,
             policy=policy,
             schedule=schedule,
+            lockout_window=args.lockout_window,
+            attempts_allowed=args.attempts,
+            attempts_allowed_business=args.attempts_business if args.timezone else args.attempts,
             user_as_pass=args.userpass or False,
             use_ssl=args.ssl or False,
             port=args.port,
@@ -513,6 +422,112 @@ def cmd_export(args) -> int:
     return 0
 
 
+def cmd_get_policy(args) -> int:
+    """Fetch and display the domain lockout policy."""
+    if not args.dc:
+        print(f"{Colors.RED}[!] Domain controller is required (-d){Colors.NC}", file=sys.stderr)
+        return 1
+    if not args.workgroup:
+        print(f"{Colors.RED}[!] Workgroup is required (-w){Colors.NC}", file=sys.stderr)
+        return 1
+    if not args.username:
+        print(f"{Colors.RED}[!] Username is required (-u){Colors.NC}", file=sys.stderr)
+        return 1
+    if not args.password:
+        print(f"{Colors.RED}[!] Password is required (-p){Colors.NC}", file=sys.stderr)
+        return 1
+
+    try:
+        policy = fetch_policy(
+            dc_host=args.dc,
+            username=args.username,
+            password=args.password,
+            workgroup=args.workgroup,
+            use_ssl=args.ssl or False,
+            port=args.port,
+            base_dn=args.base_dn,
+        )
+
+        print(f"\n{Colors.BLUE}{'═' * 50}{Colors.NC}")
+        print(f"{Colors.ORANGE} Domain Password Policy{Colors.NC}")
+        print(f"{Colors.BLUE}{'═' * 50}{Colors.NC}\n")
+
+        print(f"  {Colors.LBLUE}Lockout Threshold:{Colors.NC}      {policy.lockout_threshold}")
+        print(f"  {Colors.LBLUE}Observation Window:{Colors.NC}     {policy.lockout_observation_window_minutes} minutes")
+        print(f"  {Colors.LBLUE}Lockout Duration:{Colors.NC}       {policy.lockout_duration_minutes} minutes")
+        print(f"  {Colors.LBLUE}Min Password Length:{Colors.NC}    {policy.min_password_length}")
+        print(f"  {Colors.LBLUE}Complexity Required:{Colors.NC}    {policy.complexity_enabled}")
+
+        print(f"\n{Colors.BLUE}{'═' * 50}{Colors.NC}\n")
+
+        # Provide guidance
+        if policy.lockout_threshold == 0:
+            print(f"  {Colors.GREEN}No lockout policy - unlimited attempts allowed{Colors.NC}")
+        else:
+            safe_attempts = policy.lockout_threshold - 1
+            sleep_time = policy.lockout_observation_window_minutes + 1
+            print(f"  {Colors.ORANGE}Suggested spray settings:{Colors.NC}")
+            print(f"    --lockout-threshold {policy.lockout_threshold}")
+            print(f"    --lockout-window {policy.lockout_observation_window_minutes}")
+            print(f"\n  {Colors.BLUE}This means:{Colors.NC}")
+            print(f"    - {safe_attempts} password attempt(s) per user before sleeping")
+            print(f"    - {sleep_time} minute sleep between password batches")
+
+        print()
+        return 0
+
+    except Exception as e:
+        print(f"{Colors.RED}[!] Failed to fetch policy: {e}{Colors.NC}", file=sys.stderr)
+        return 1
+
+
+def cmd_get_users(args) -> int:
+    """Fetch users from AD and save to file."""
+    if not args.dc:
+        print(f"{Colors.RED}[!] Domain controller is required (-d){Colors.NC}", file=sys.stderr)
+        return 1
+    if not args.workgroup:
+        print(f"{Colors.RED}[!] Workgroup is required (-w){Colors.NC}", file=sys.stderr)
+        return 1
+    if not args.username:
+        print(f"{Colors.RED}[!] Username is required (-u){Colors.NC}", file=sys.stderr)
+        return 1
+    if not args.password:
+        print(f"{Colors.RED}[!] Password is required (-p){Colors.NC}", file=sys.stderr)
+        return 1
+
+    output_file = args.output or "users.txt"
+
+    try:
+        print(f"{Colors.BLUE}[+] Connecting to {args.dc}...{Colors.NC}", file=sys.stderr)
+        users = fetch_users(
+            dc_host=args.dc,
+            username=args.username,
+            password=args.password,
+            workgroup=args.workgroup,
+            use_ssl=args.ssl or False,
+            port=args.port,
+            base_dn=args.base_dn,
+        )
+
+        if not users:
+            print(f"{Colors.ORANGE}[!] No users found{Colors.NC}", file=sys.stderr)
+            return 1
+
+        # Write to file
+        with open(output_file, 'w') as f:
+            for user in users:
+                f.write(f"{user}\n")
+
+        print(f"{Colors.GREEN}[+] Found {len(users)} users{Colors.NC}", file=sys.stderr)
+        print(f"{Colors.GREEN}[+] Saved to: {output_file}{Colors.NC}", file=sys.stderr)
+        return 0
+
+    except Exception as e:
+        print(f"{Colors.RED}[!] Failed to fetch users: {e}{Colors.NC}", file=sys.stderr)
+        return 1
+
+
 def main() -> int:
     """Main entry point for the CLI."""
     parser = argparse.ArgumentParser(
@@ -528,47 +543,30 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # With config file
-  %(prog)s --config spray.ini
-
-  # With AD creds (auto-enumerate users and fetch policy)
-  %(prog)s -d 10.0.0.1 -w CORP -u admin -p 'P@ss' --passwords passwords.txt
-
-  # With AD creds + users file (fetch policy only)
-  %(prog)s -d dc01.local -w CORP -u admin -p 'P@ss' --passwords pwds.txt --users users.txt
-
-  # Without AD creds (manual policy, requires --users)
-  %(prog)s -d 10.0.0.1 -w CORP --users users.txt --passwords pwds.txt
-
-  # Without AD creds, custom policy
+  # Basic spray (no business hours consideration)
   %(prog)s -d 10.0.0.1 -w CORP --users users.txt --passwords pwds.txt \\
-      --lockout-threshold 3 --lockout-window 15 --min-length 10 --complexity
+      --lockout-window 30 --attempts 4
 
-  # Resume existing spray (by ID or name)
+  # With business hours (different attempts during/outside business hours)
+  %(prog)s -d 10.0.0.1 -w CORP --users users.txt --passwords pwds.txt \\
+      --lockout-window 30 --attempts 4 --timezone America/New_York --attempts-business 2
+
+  # Pause during business hours (0 attempts)
+  %(prog)s -d 10.0.0.1 -w CORP --users users.txt --passwords pwds.txt \\
+      --lockout-window 30 --attempts 4 --timezone America/New_York --attempts-business 0
+
+  # Resume existing spray
   %(prog)s --resume 1
-  %(prog)s --resume "Q1 Audit"
-
-  # Resume (interactive session selection)
-  %(prog)s --resume
 
   # Get credentials from a session
   %(prog)s --get-creds 1
-
-  # Get credentials (interactive session selection)
-  %(prog)s --get-creds
-
-  # Use 'auto' for users and policy (requires AD creds)
-  %(prog)s --config spray.ini  # with users_file=auto, lockout_threshold=auto, etc.
         """,
     )
     spray_parser.add_argument("-c", "--config", help="Configuration file (INI format)")
     spray_parser.add_argument("-d", "--dc", help="Domain controller FQDN or IP address")
     spray_parser.add_argument("-w", "--workgroup", help="NetBIOS domain/workgroup name (e.g., CORP)")
-    spray_parser.add_argument("-u", "--username", help="Username for AD enumeration (required for 'auto' settings)")
-    spray_parser.add_argument("-p", "--password", help="Password for AD enumeration (required for 'auto' settings)")
-    spray_parser.add_argument("--base-dn", dest="base_dn", help="Override LDAP base DN")
     spray_parser.add_argument("--passwords", dest="spray_passwords", help="File containing passwords to spray")
-    spray_parser.add_argument("--users", dest="users_file", help="File containing users, or 'auto' to enumerate from AD")
+    spray_parser.add_argument("--users", dest="users_file", help="File containing usernames to spray")
     spray_parser.add_argument("-o", "--output", help="Output file for valid credentials (default: valid_creds.txt)")
     spray_parser.add_argument("-v", "--verbose", type=int, choices=[0, 1, 2, 3],
                               help="Verbosity level (0=silent, 3=max, default: 3)")
@@ -581,21 +579,22 @@ Examples:
                               help="Show valid credentials from a session (prompts for selection if no ID given)")
     spray_parser.add_argument("--session-path", default=str(DEFAULT_SESSION_PATH),
                               help=f"Session storage path (default: {DEFAULT_SESSION_PATH})")
-    # Policy override flags (used when no AD creds available, or 'auto' for AD lookup)
-    spray_parser.add_argument("--lockout-threshold",
-                              help="Lockout threshold (integer or 'auto' for AD lookup)")
-    spray_parser.add_argument("--lockout-window",
-                              help="Lockout observation window in minutes (integer or 'auto')")
-    spray_parser.add_argument("--min-length",
-                              help="Minimum password length (integer or 'auto')")
-    spray_parser.add_argument("--complexity",
-                              help="Password complexity ('true', 'false', or 'auto')")
-    # Schedule options
+    # Timing flags
+    spray_parser.add_argument("--lockout-window", type=int,
+                              help="Lockout observation window in minutes (use get-policy to fetch from AD)")
+    spray_parser.add_argument("--attempts", type=int,
+                              help="Attempts per user per window (required if no --timezone)")
+    # Business hours scheduling
     spray_parser.add_argument("--timezone", help="Timezone for business hours (IANA format, e.g., America/New_York)")
-    spray_parser.add_argument("--business-hours-reduction", type=int,
-                              help="Attempt reduction during business hours (default: 3)")
+    spray_parser.add_argument("--attempts-business", type=int,
+                              help="Attempts during business hours (required with --timezone, 0 = pause)")
     spray_parser.add_argument("--force-system-time", action="store_true",
                               help="Use system clock instead of external time verification (not recommended)")
+    # Password filtering
+    spray_parser.add_argument("--min-length", type=int,
+                              help="Minimum password length for filtering")
+    spray_parser.add_argument("--complexity", action="store_true",
+                              help="Enable password complexity filtering")
     # Session naming options
     spray_parser.add_argument("--name", help="Human-readable session name (e.g., 'Q1 External Audit')")
     spray_parser.set_defaults(func=cmd_spray)
@@ -622,47 +621,50 @@ Examples:
                                help=f"Session storage path (default: {DEFAULT_SESSION_PATH})")
     export_parser.set_defaults(func=cmd_export)
 
+    # Get-policy subcommand
+    policy_parser = subparsers.add_parser(
+        "get-policy",
+        help="Fetch and display the domain lockout policy",
+        epilog="""
+Examples:
+  %(prog)s -d 10.0.0.1 -w CORP -u admin -p 'P@ss'
+  %(prog)s -d dc01.corp.local -w CORP -u admin -p 'P@ss' --ssl
+        """,
+    )
+    policy_parser.add_argument("-d", "--dc", help="Domain controller FQDN or IP address")
+    policy_parser.add_argument("-w", "--workgroup", help="NetBIOS domain/workgroup name (e.g., CORP)")
+    policy_parser.add_argument("-u", "--username", help="Username for AD authentication")
+    policy_parser.add_argument("-p", "--password", help="Password for AD authentication")
+    policy_parser.add_argument("--base-dn", dest="base_dn", help="Override LDAP base DN")
+    policy_parser.add_argument("--ssl", action="store_true", help="Use LDAPS (SSL/TLS)")
+    policy_parser.add_argument("--port", type=int, help="Override port number")
+    policy_parser.set_defaults(func=cmd_get_policy)
+
+    # Get-users subcommand
+    users_parser = subparsers.add_parser(
+        "get-users",
+        help="Fetch users from AD and save to file",
+        epilog="""
+Examples:
+  %(prog)s -d 10.0.0.1 -w CORP -u admin -p 'P@ss'
+  %(prog)s -d dc01.corp.local -w CORP -u admin -p 'P@ss' -o targets.txt
+        """,
+    )
+    users_parser.add_argument("-d", "--dc", help="Domain controller FQDN or IP address")
+    users_parser.add_argument("-w", "--workgroup", help="NetBIOS domain/workgroup name (e.g., CORP)")
+    users_parser.add_argument("-u", "--username", help="Username for AD authentication")
+    users_parser.add_argument("-p", "--password", help="Password for AD authentication")
+    users_parser.add_argument("-o", "--output", help="Output file (default: users.txt)")
+    users_parser.add_argument("--base-dn", dest="base_dn", help="Override LDAP base DN")
+    users_parser.add_argument("--ssl", action="store_true", help="Use LDAPS (SSL/TLS)")
+    users_parser.add_argument("--port", type=int, help="Override port number")
+    users_parser.set_defaults(func=cmd_get_users)
+
     args = parser.parse_args()
 
     # Disable colors if not a TTY
     if not sys.stderr.isatty():
         Colors.disable()
-
-    # Handle policy args that can be 'auto' or int
-    if hasattr(args, 'lockout_threshold') and args.lockout_threshold is not None:
-        if args.lockout_threshold != 'auto':
-            try:
-                args.lockout_threshold = int(args.lockout_threshold)
-            except ValueError:
-                print(f"{Colors.RED}[!] Invalid lockout-threshold: {args.lockout_threshold}{Colors.NC}", file=sys.stderr)
-                return 1
-
-    if hasattr(args, 'lockout_window') and args.lockout_window is not None:
-        if args.lockout_window != 'auto':
-            try:
-                args.lockout_window = int(args.lockout_window)
-            except ValueError:
-                print(f"{Colors.RED}[!] Invalid lockout-window: {args.lockout_window}{Colors.NC}", file=sys.stderr)
-                return 1
-
-    if hasattr(args, 'min_length') and args.min_length is not None:
-        if args.min_length != 'auto':
-            try:
-                args.min_length = int(args.min_length)
-            except ValueError:
-                print(f"{Colors.RED}[!] Invalid min-length: {args.min_length}{Colors.NC}", file=sys.stderr)
-                return 1
-
-    if hasattr(args, 'complexity') and args.complexity is not None:
-        if args.complexity == 'auto':
-            pass
-        elif args.complexity.lower() in ('true', '1', 'yes'):
-            args.complexity = True
-        elif args.complexity.lower() in ('false', '0', 'no'):
-            args.complexity = False
-        else:
-            print(f"{Colors.RED}[!] Invalid complexity: {args.complexity}{Colors.NC}", file=sys.stderr)
-            return 1
 
     if not args.command:
         parser.print_help()

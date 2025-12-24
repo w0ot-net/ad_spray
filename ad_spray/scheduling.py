@@ -300,7 +300,6 @@ class BusinessHoursWindow:
 class Schedule:
     """Business hours schedule with timezone."""
     timezone: Optional[str]  # IANA timezone name, None means disabled
-    business_hours_reduction: int
     daily_hours: Dict[str, BusinessHoursWindow]  # day name -> hours
 
     def is_enabled(self) -> bool:
@@ -350,19 +349,6 @@ class Schedule:
 
         is_business = hours.is_within_hours(current_time)
         return is_business, False
-
-    def get_reduced_attempts(self, lockout_threshold: int) -> int:
-        """
-        Calculate reduced attempts during business hours.
-
-        Args:
-            lockout_threshold: The lockout threshold from policy
-
-        Returns:
-            Reduced attempt count (may be 0 or negative, meaning pause)
-            e.g., threshold=5, reduction=3 -> 2 attempts allowed
-        """
-        return lockout_threshold - self.business_hours_reduction
 
     def get_time_until_business_hours_end(self) -> Optional[int]:
         """
@@ -420,7 +406,6 @@ class Schedule:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "timezone": self.timezone,
-            "business_hours_reduction": self.business_hours_reduction,
             "daily_hours": {k: v.to_dict() for k, v in self.daily_hours.items()},
         }
 
@@ -428,7 +413,6 @@ class Schedule:
     def from_dict(cls, d: Dict[str, Any]) -> "Schedule":
         return cls(
             timezone=d.get("timezone"),
-            business_hours_reduction=d.get("business_hours_reduction", 3),
             daily_hours={k: BusinessHoursWindow.from_dict(v) for k, v in d.get("daily_hours", {}).items()},
         )
 
@@ -437,7 +421,6 @@ class Schedule:
         """Create a disabled schedule."""
         return cls(
             timezone=None,
-            business_hours_reduction=0,
             daily_hours={},
         )
 
@@ -465,7 +448,6 @@ def format_schedule_display(schedule: Schedule, time_verifier: TimeVerifier) -> 
         current_time = None
 
     lines.append(f"  Timezone: {schedule.timezone}")
-    lines.append(f"  Business hours reduction: {schedule.business_hours_reduction} attempts")
     lines.append("")
     lines.append("  Weekly Schedule:")
 
@@ -476,9 +458,9 @@ def format_schedule_display(schedule: Schedule, time_verifier: TimeVerifier) -> 
         elif hours.pause_all_day:
             hours_str = "PAUSE (no spraying)"
         elif hours.start is None:
-            hours_str = "off (full speed)"
+            hours_str = "off"
         else:
-            hours_str = f"{hours.start.strftime('%H:%M')}-{hours.end.strftime('%H:%M')} (reduced attempts)"
+            hours_str = f"{hours.start.strftime('%H:%M')}-{hours.end.strftime('%H:%M')} (business hours)"
 
         # Mark current day
         marker = " <-- TODAY" if day == current_day else ""
@@ -493,8 +475,8 @@ def format_schedule_display(schedule: Schedule, time_verifier: TimeVerifier) -> 
         if should_pause:
             lines.append(f"  Current status: PAUSED (schedule dictates no spraying now)")
         elif is_business:
-            lines.append(f"  Current status: BUSINESS HOURS (reduced attempts active)")
+            lines.append(f"  Current status: BUSINESS HOURS")
         else:
-            lines.append(f"  Current status: Outside business hours (full speed)")
+            lines.append(f"  Current status: Outside business hours")
 
     return "\n".join(lines)

@@ -25,8 +25,8 @@ from .session import (
     load_session,
     list_sessions,
     delete_session,
-    fetch_domain_info,
-    fetch_policy_only,
+    fetch_policy,
+    fetch_users,
 )
 from .config import load_config
 from .policy import password_meets_policy, password_contains_username
@@ -63,8 +63,8 @@ __all__ = [
     "load_session",
     "list_sessions",
     "delete_session",
-    "fetch_domain_info",
-    "fetch_policy_only",
+    "fetch_policy",
+    "fetch_users",
     # Config
     "load_config",
     # Policy

@@ -73,6 +73,9 @@ def create_session(
     policy: PasswordPolicy,
     schedule: Schedule,
     name: str,
+    lockout_window: int,
+    attempts_allowed: int,
+    attempts_allowed_business: int,
     user_as_pass: bool = False,
     use_ssl: bool = False,
     port: Optional[int] = None,
@@ -96,6 +99,17 @@ def create_session(
         name=name,
     )
 
+    session = SpraySession(
+        config=config,
+        policy=policy,
+        schedule=schedule,
+        users=users,
+        passwords=passwords,
+        lockout_window=lockout_window,
+        attempts_allowed=attempts_allowed,
+        attempts_allowed_business=attempts_allowed_business,
+    )
+
     # Create session using new storage format
     store = SessionStore(session_path, session_id)
     store.create(
@@ -104,16 +118,14 @@ def create_session(
         schedule=schedule.to_dict(),
         users=users,
         passwords=passwords,
+        timing={
+            "lockout_window": lockout_window,
+            "attempts_allowed": attempts_allowed,
+            "attempts_allowed_business": attempts_allowed_business,
+        },
     )
 
-    # Return a SpraySession object for compatibility
-    return SpraySession(
-        config=config,
-        policy=policy,
-        schedule=schedule,
-        users=users,
-        passwords=passwords,
-    )
+    return session
 
 
 def load_session(session_path: Path, session_id: str) -> SpraySession:
@@ -135,6 +147,7 @@ def load_session(session_path: Path, session_id: str) -> SpraySession:
     config = SprayConfig.from_dict(store.load_config())
     policy = PasswordPolicy.from_dict(store.load_policy())
     schedule = Schedule.from_dict(store.load_schedule())
+    timing = store.load_timing()
     users = store.load_users()
     passwords = store.load_passwords()
     state = store.load_state()
@@ -166,6 +179,9 @@ def load_session(session_path: Path, session_id: str) -> SpraySession:
         skipped_passwords=state.skipped_passwords,
         current_password_index=state.current_password_index,
         attempts_since_sleep=state.attempts_since_sleep,
+        lockout_window=timing.get("lockout_window", 30),
+        attempts_allowed=timing.get("attempts_allowed", 1),
+        attempts_allowed_business=timing.get("attempts_allowed_business", 0),
     )
 
 
@@ -250,10 +266,10 @@ def mark_session_completed(session_path: Path, session_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# AD Fetch Functions (unchanged)
+# AD Fetch Functions
 # ---------------------------------------------------------------------------
 
-def fetch_domain_info(
+def fetch_policy(
     dc_host: str,
     username: str,
     password: str,
@@ -261,67 +277,11 @@ def fetch_domain_info(
     use_ssl: bool = False,
     port: Optional[int] = None,
     base_dn: Optional[str] = None,
-    verbose: int = 3,
-) -> tuple:
-    """
-    Connect to AD and fetch users and policy.
-    Returns (users, policy) tuple.
-    """
-    def _print(msg: str, level: int = 3):
-        if verbose >= level:
-            print(msg, file=sys.stderr)
-
-    _print(f"{Colors.BLUE}[+] Connecting to {dc_host}...{Colors.NC}", level=1)
-
-    with ADConnection(
-        dc_host=dc_host,
-        username=username,
-        password=password,
-        workgroup=workgroup,
-        base_dn=base_dn,
-        use_ssl=use_ssl,
-        port=port,
-    ) as ad:
-        _print(f"{Colors.BLUE}[+] Connected. Base DN: {ad.base_dn}{Colors.NC}", level=2)
-
-        # Fetch users
-        _print(f"{Colors.BLUE}[+] Enumerating users...{Colors.NC}", level=1)
-        users = ad.get_users()
-        _print(f"{Colors.GREEN}[+] Found {len(users)} users{Colors.NC}", level=1)
-
-        # Fetch lockout policy
-        _print(f"{Colors.BLUE}[+] Fetching lockout policy...{Colors.NC}", level=1)
-        policy_dict = ad.get_lockout_policy()
-        policy = PasswordPolicy.from_dict(policy_dict)
-
-        _print(f"{Colors.GREEN}[+] Lockout threshold: {policy.lockout_threshold}{Colors.NC}", level=1)
-        _print(f"{Colors.GREEN}[+] Observation window: {policy.lockout_observation_window_minutes} min{Colors.NC}", level=1)
-        _print(f"{Colors.GREEN}[+] Min password length: {policy.min_password_length}{Colors.NC}", level=1)
-        _print(f"{Colors.GREEN}[+] Complexity required: {policy.complexity_enabled}{Colors.NC}", level=1)
-
-        return users, policy
-
-
-def fetch_policy_only(
-    dc_host: str,
-    username: str,
-    password: str,
-    workgroup: str,
-    use_ssl: bool = False,
-    port: Optional[int] = None,
-    base_dn: Optional[str] = None,
-    verbose: int = 3,
 ) -> PasswordPolicy:
     """
-    Connect to AD and fetch only the policy.
+    Connect to AD and fetch the lockout policy.
     Returns PasswordPolicy.
     """
-    def _print(msg: str, level: int = 3):
-        if verbose >= level:
-            print(msg, file=sys.stderr)
-
-    _print(f"{Colors.BLUE}[+] Connecting to {dc_host} for policy...{Colors.NC}", level=1)
-
     with ADConnection(
         dc_host=dc_host,
         username=username,
@@ -331,13 +291,30 @@ def fetch_policy_only(
         use_ssl=use_ssl,
         port=port,
     ) as ad:
-        _print(f"{Colors.BLUE}[+] Fetching lockout policy...{Colors.NC}", level=1)
         policy_dict = ad.get_lockout_policy()
-        policy = PasswordPolicy.from_dict(policy_dict)
+        return PasswordPolicy.from_dict(policy_dict)
 
-        _print(f"{Colors.GREEN}[+] Lockout threshold: {policy.lockout_threshold}{Colors.NC}", level=1)
-        _print(f"{Colors.GREEN}[+] Observation window: {policy.lockout_observation_window_minutes} min{Colors.NC}", level=1)
-        _print(f"{Colors.GREEN}[+] Min password length: {policy.min_password_length}{Colors.NC}", level=1)
-        _print(f"{Colors.GREEN}[+] Complexity required: {policy.complexity_enabled}{Colors.NC}", level=1)
 
-        return policy
+def fetch_users(
+    dc_host: str,
+    username: str,
+    password: str,
+    workgroup: str,
+    use_ssl: bool = False,
+    port: Optional[int] = None,
+    base_dn: Optional[str] = None,
+) -> List[str]:
+    """
+    Connect to AD and enumerate users.
+    Returns list of usernames.
+    """
+    with ADConnection(
+        dc_host=dc_host,
+        username=username,
+        password=password,
+        workgroup=workgroup,
+        base_dn=base_dn,
+        use_ssl=use_ssl,
+        port=port,
+    ) as ad:
+        return ad.get_users()

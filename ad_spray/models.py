@@ -12,22 +12,14 @@ from .scheduling import Schedule
 
 @dataclass
 class PasswordPolicy:
-    """Domain password and lockout policy."""
-    lockout_threshold: int  # 0 = no lockout
-    lockout_duration_minutes: int
-    lockout_observation_window_minutes: int
+    """Password filtering policy."""
     min_password_length: int
-    password_history_length: int
     complexity_enabled: bool  # Windows password complexity rules
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "PasswordPolicy":
         return cls(
-            lockout_threshold=d.get("lockout_threshold", 0),
-            lockout_duration_minutes=d.get("lockout_duration_minutes", 30),
-            lockout_observation_window_minutes=d.get("lockout_observation_window_minutes", 30),
             min_password_length=d.get("min_password_length", 0),
-            password_history_length=d.get("password_history_length", 0),
             complexity_enabled=d.get("complexity_enabled", False),
         )
 
@@ -87,6 +79,10 @@ class SpraySession:
     skipped_passwords: Set[str] = field(default_factory=set)
     current_password_index: int = 0
     attempts_since_sleep: int = 0
+    # Spray timing settings
+    lockout_window: int = 30  # minutes
+    attempts_allowed: int = 1  # attempts per window (non-business hours / no schedule)
+    attempts_allowed_business: int = 0  # attempts during business hours (0 = pause)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -100,6 +96,9 @@ class SpraySession:
             "skipped_passwords": list(self.skipped_passwords),
             "current_password_index": self.current_password_index,
             "attempts_since_sleep": self.attempts_since_sleep,
+            "lockout_window": self.lockout_window,
+            "attempts_allowed": self.attempts_allowed,
+            "attempts_allowed_business": self.attempts_allowed_business,
         }
 
     @classmethod
@@ -115,6 +114,9 @@ class SpraySession:
             skipped_passwords=set(d.get("skipped_passwords", [])),
             current_password_index=d.get("current_password_index", 0),
             attempts_since_sleep=d.get("attempts_since_sleep", 0),
+            lockout_window=d.get("lockout_window", 30),
+            attempts_allowed=d.get("attempts_allowed", 1),
+            attempts_allowed_business=d.get("attempts_allowed_business", 0),
         )
 
     def get_stats(self) -> Dict[str, int]:
@@ -129,34 +131,19 @@ class SpraySession:
 
     def get_safe_attempts_per_window(
         self,
-        apply_schedule: bool = True,
         time_verifier: Optional[Any] = None
     ) -> int:
         """
-        Calculate the maximum attempts per user within the observation window
-        that won't trigger lockout.
+        Get the number of attempts allowed per observation window.
 
         Args:
-            apply_schedule: If True, apply business hours reduction if applicable
             time_verifier: Optional TimeVerifier to use for accurate time
 
         Returns:
-            n-1 where n is the lockout threshold (possibly reduced for business hours).
-            Returns 0 or negative if should pause entirely.
-            e.g., threshold=5 -> 4 attempts allowed
-                  threshold=1 -> 0 attempts (cannot spray safely!)
-                  threshold=0 -> unlimited (no lockout policy)
+            Number of attempts allowed. Returns 0 if should pause.
         """
-        if self.policy.lockout_threshold == 0:
-            # No lockout policy
-            return 100
-
-        # Base: exactly n-1 to guarantee no lockout
-        base_attempts = self.policy.lockout_threshold - 1
-
-        # Apply schedule reduction if enabled and in business hours
-        if apply_schedule and self.schedule.is_enabled():
-            # Get current time from verifier if available, otherwise use system time
+        # If schedule is enabled, check if we're in business hours
+        if self.schedule.is_enabled():
             if time_verifier:
                 current_time = time_verifier.get_current_time(self.schedule.timezone)
                 is_business, should_pause = self.schedule.get_current_status_with_time(current_time)
@@ -164,23 +151,17 @@ class SpraySession:
                 is_business, should_pause = self.schedule.get_current_status()
 
             if should_pause:
-                return 0  # Pause day
+                return 0
             if is_business:
-                # During business hours: threshold - reduction
-                # e.g., threshold=5, reduction=3 -> 2 attempts
-                return self.schedule.get_reduced_attempts(self.policy.lockout_threshold)
+                return self.attempts_allowed_business
 
-        return base_attempts
+        return self.attempts_allowed
 
     def get_sleep_time_seconds(self) -> int:
         """
         Get the sleep time needed between password batches.
 
-        Returns m+1 minutes (in seconds) where m is the observation window.
+        Returns (lockout_window + 1) minutes in seconds.
         e.g., window=30 min -> sleep 31 min (1860 seconds)
         """
-        if self.policy.lockout_threshold == 0:
-            return 0
-
-        # Exactly m+1 minutes to guarantee counter reset
-        return (self.policy.lockout_observation_window_minutes + 1) * 60
+        return (self.lockout_window + 1) * 60
