@@ -1,5 +1,6 @@
 """SMB-based authentication checking via impacket."""
 
+import time
 from typing import Any, Dict
 
 from impacket.smbconnection import SMBConnection, SessionError
@@ -36,33 +37,12 @@ NT_STATUS_MAP = {
     0xC0000064: ERROR_LOGON_FAILURE,           # STATUS_NO_SUCH_USER
 }
 
+_MAX_RETRIES = 2
+_RETRY_DELAY = 1  # seconds
 
-def check_auth(
-    dc_host: str,
-    username: str,
-    password: str,
-    workgroup: str = "",
-    port: int = 445,
-) -> Dict[str, Any]:
-    """
-    Attempt SMB authentication against a domain controller.
 
-    Args:
-        dc_host: Domain controller FQDN or IP address
-        username: Username to test (with or without domain prefix)
-        password: Password to test
-        workgroup: NetBIOS domain/workgroup name
-        port: SMB port (default: 445)
-
-    Returns:
-        Dictionary with success, status, status_code, message keys.
-    """
-    # Strip domain prefixes (DOMAIN\user or user@domain)
-    if "\\" in username:
-        username = username.partition("\\")[2]
-    else:
-        username = username.partition("@")[0] or username
-
+def _try_auth(dc_host: str, username: str, password: str, workgroup: str, port: int) -> Dict[str, Any]:
+    """Single SMB auth attempt. Returns result dict."""
     smb = None
     try:
         smb = SMBConnection(dc_host, dc_host, sess_port=port)
@@ -105,3 +85,41 @@ def check_auth(
                 smb.close()
             except Exception:
                 pass
+
+
+def check_auth(
+    dc_host: str,
+    username: str,
+    password: str,
+    workgroup: str = "",
+    port: int = 445,
+) -> Dict[str, Any]:
+    """
+    Attempt SMB authentication against a domain controller.
+
+    Retries on transient connection errors (connection refused, reset)
+    since DCs may briefly reject connections under rapid spray load.
+
+    Args:
+        dc_host: Domain controller FQDN or IP address
+        username: Username to test (with or without domain prefix)
+        password: Password to test
+        workgroup: NetBIOS domain/workgroup name
+        port: SMB port (default: 445)
+
+    Returns:
+        Dictionary with success, status, status_code, message keys.
+    """
+    # Strip domain prefixes (DOMAIN\user or user@domain)
+    if "\\" in username:
+        username = username.partition("\\")[2]
+    else:
+        username = username.partition("@")[0] or username
+
+    for attempt in range(_MAX_RETRIES):
+        result = _try_auth(dc_host, username, password, workgroup, port)
+        if result["status"] != ERROR_HOST_UNREACHABLE:
+            return result
+        if attempt < _MAX_RETRIES - 1:
+            time.sleep(_RETRY_DELAY)
+    return result
