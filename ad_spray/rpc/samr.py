@@ -49,21 +49,21 @@ def fetch_policy_rpc(dc_host: str, port: int = 445) -> DomainPolicy:
     """Fetch domain password/lockout policy via SAMR null session."""
     dce, domain_handle = _connect(dc_host, port)
 
-    # Password info (level 1)
+    # Password info (level 1) — union member is 'Password'
     pwd_info = samr.hSamrQueryInformationDomain(
         dce, domain_handle,
         domainInformationClass=samr.DOMAIN_INFORMATION_CLASS.DomainPasswordInformation,
-    )["Buffer"]["Buffer"]
+    )["Buffer"]["Password"]
 
     min_pwd_length = pwd_info["MinPasswordLength"]
     pwd_properties = pwd_info["PasswordProperties"]
     complexity_enabled = bool(pwd_properties & 1)
 
-    # Lockout info (level 12)
+    # Lockout info (level 12) — union member is 'Lockout'
     lockout_info = samr.hSamrQueryInformationDomain(
         dce, domain_handle,
         domainInformationClass=samr.DOMAIN_INFORMATION_CLASS.DomainLockoutInformation,
-    )["Buffer"]["Buffer"]
+    )["Buffer"]["Lockout"]
 
     lockout_threshold = lockout_info["LockoutThreshold"]
     lockout_duration = _ndrhyper_to_minutes(lockout_info["LockoutDuration"])
