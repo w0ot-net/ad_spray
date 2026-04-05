@@ -109,7 +109,8 @@ def cmd_spray(args) -> int:
     for key in ['dc', 'workgroup', 'ssl', 'port',
                 'spray_passwords', 'users_file', 'output', 'userpass', 'verbose',
                 'lockout_window', 'attempts', 'attempts_business',
-                'min_length', 'complexity', 'timezone', 'daily_hours']:
+                'min_length', 'complexity', 'timezone', 'daily_hours',
+                'ldap_auth']:
         if not hasattr(args, key):
             setattr(args, key, None)
 
@@ -201,6 +202,10 @@ def cmd_spray(args) -> int:
             print(f"{Colors.RED}[!] --attempts-business is required when using --timezone{Colors.NC}", file=sys.stderr)
             return 1
 
+        # Warn if --ssl used without --ldap-auth (SSL is meaningless for SMB)
+        if (args.ssl or False) and not (args.ldap_auth or False):
+            print(f"{Colors.ORANGE}[!] --ssl has no effect without --ldap-auth (SMB auth does not use SSL){Colors.NC}", file=sys.stderr)
+
         # Load passwords to spray
         if args.spray_passwords:
             try:
@@ -282,6 +287,7 @@ def cmd_spray(args) -> int:
             attempts_allowed=args.attempts,
             attempts_allowed_business=args.attempts_business if args.timezone else args.attempts,
             user_as_pass=args.userpass or False,
+            use_ldap_auth=args.ldap_auth or False,
             use_ssl=args.ssl or False,
             port=args.port,
             output_file=args.output or 'valid_creds.txt',
@@ -608,8 +614,10 @@ Examples:
     spray_parser.add_argument("-v", "--verbose", type=int, choices=[0, 1, 2, 3],
                               help="Verbosity level (0=silent, 3=max, default: 3)")
     spray_parser.add_argument("--userpass", action="store_true", help="Try username as password")
-    spray_parser.add_argument("--ssl", action="store_true", help="Use LDAPS (SSL/TLS)")
-    spray_parser.add_argument("--port", type=int, help="Override port number")
+    spray_parser.add_argument("--ldap-auth", action="store_true",
+                              help="Use LDAP authentication instead of SMB (default is SMB on port 445)")
+    spray_parser.add_argument("--ssl", action="store_true", help="Use LDAPS (SSL/TLS, requires --ldap-auth)")
+    spray_parser.add_argument("--port", type=int, help="Override port number (default: 445 for SMB, 389/636 for LDAP)")
     spray_parser.add_argument("--resume", nargs="?", const=True, metavar="SESSION_ID",
                               help="Resume an existing session (prompts for selection if no ID given)")
     spray_parser.add_argument("--get-creds", nargs="?", const=True, metavar="SESSION_ID",

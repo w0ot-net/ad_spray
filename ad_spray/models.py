@@ -65,6 +65,7 @@ class SprayConfig:
     created_at: str
     name: str  # Human-readable session name (required)
     completed: bool = False
+    use_ldap_auth: bool = False  # False = SMB (default), True = LDAP
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -22,7 +22,8 @@ from .constants import (
     ERROR_HOST_UNREACHABLE,
     ERROR_GEN_FAILURE,
 )
-from .ldap import check_auth
+from .ldap.auth import check_auth as ldap_check_auth
+from .smb.auth import check_auth as smb_check_auth
 from .models import Attempt, SpraySession
 from .policy import password_meets_policy, password_contains_username
 from .scheduling import TimeVerifier, format_schedule_display
@@ -291,14 +292,23 @@ class SprayEngine:
     def _check_credential(self, username: str, password: str) -> str:
         """Check a single credential against AD. Returns the error code."""
         config = self.session.config
-        result = check_auth(
-            dc_host=config.dc_host,
-            username=username,
-            password=password,
-            workgroup=config.workgroup,
-            use_ssl=config.use_ssl,
-            port=config.port,
-        )
+        if config.use_ldap_auth:
+            result = ldap_check_auth(
+                dc_host=config.dc_host,
+                username=username,
+                password=password,
+                workgroup=config.workgroup,
+                use_ssl=config.use_ssl,
+                port=config.port,
+            )
+        else:
+            result = smb_check_auth(
+                dc_host=config.dc_host,
+                username=username,
+                password=password,
+                workgroup=config.workgroup,
+                port=config.port or 445,
+            )
         return result["status"]
 
     def _wait_for_business_hours_end(self):

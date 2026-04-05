@@ -23,6 +23,7 @@ def load_config(config_path: str) -> Dict[str, Any]:
         result['dc'] = config.get('target', 'dc', fallback=None)
         result['workgroup'] = config.get('target', 'workgroup', fallback=None)
         result['ssl'] = config.getboolean('target', 'ssl', fallback=False)
+        result['ldap_auth'] = config.getboolean('target', 'ldap_auth', fallback=False)
         port_str = config.get('target', 'port', fallback='')
         result['port'] = int(port_str) if port_str.strip() else None
 

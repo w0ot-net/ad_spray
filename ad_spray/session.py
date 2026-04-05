@@ -77,6 +77,7 @@ def create_session(
     attempts_allowed: int,
     attempts_allowed_business: int,
     user_as_pass: bool = False,
+    use_ldap_auth: bool = False,
     use_ssl: bool = False,
     port: Optional[int] = None,
     output_file: Optional[str] = None,
@@ -95,6 +96,7 @@ def create_session(
         output_file=output_file,
         verbose=verbose,
         user_as_pass=user_as_pass,
+        use_ldap_auth=use_ldap_auth,
         created_at=datetime.now().isoformat(),
         name=name,
     )
