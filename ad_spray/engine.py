@@ -629,6 +629,7 @@ class SprayEngine:
         result = self._check_credential(username, password)
         status = result["status"]
         timestamp = datetime.now().isoformat()
+        time.sleep(0.1)  # Pace connections to avoid DC rate-limiting
 
         # Record the attempt using append-only storage (fast)
         attempt_record = AttemptRecord(
