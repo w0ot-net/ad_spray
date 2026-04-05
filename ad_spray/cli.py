@@ -184,8 +184,8 @@ def cmd_spray(args) -> int:
         if not args.workgroup:
             print(f"{Colors.RED}[!] Workgroup is required (-w){Colors.NC}", file=sys.stderr)
             return 1
-        if not args.spray_passwords:
-            print(f"{Colors.RED}[!] Passwords file is required (--passwords){Colors.NC}", file=sys.stderr)
+        if not args.spray_passwords and not args.userpass:
+            print(f"{Colors.RED}[!] --passwords or --userpass is required{Colors.NC}", file=sys.stderr)
             return 1
         if not args.users_file:
             print(f"{Colors.RED}[!] Users file is required (--users){Colors.NC}", file=sys.stderr)
@@ -202,16 +202,19 @@ def cmd_spray(args) -> int:
             return 1
 
         # Load passwords to spray
-        try:
-            with open(args.spray_passwords) as f:
-                passwords = [line.strip() for line in f if line.strip()]
-        except FileNotFoundError:
-            print(f"{Colors.RED}[!] Passwords file not found: {args.spray_passwords}{Colors.NC}", file=sys.stderr)
-            return 1
+        if args.spray_passwords:
+            try:
+                with open(args.spray_passwords) as f:
+                    passwords = [line.strip() for line in f if line.strip()]
+            except FileNotFoundError:
+                print(f"{Colors.RED}[!] Passwords file not found: {args.spray_passwords}{Colors.NC}", file=sys.stderr)
+                return 1
 
-        if not passwords:
-            print(f"{Colors.RED}[!] Passwords file is empty{Colors.NC}", file=sys.stderr)
-            return 1
+            if not passwords:
+                print(f"{Colors.RED}[!] Passwords file is empty{Colors.NC}", file=sys.stderr)
+                return 1
+        else:
+            passwords = []
 
         # Load users
         try:
@@ -225,7 +228,8 @@ def cmd_spray(args) -> int:
             print(f"{Colors.RED}[!] Users file is empty{Colors.NC}", file=sys.stderr)
             return 1
 
-        print(f"{Colors.GREEN}[+] Loaded {len(users)} users from file{Colors.NC}", file=sys.stderr)
+        mode = "userpass only" if not passwords else f"{len(passwords)} passwords" + (" + userpass" if args.userpass else "")
+        print(f"{Colors.GREEN}[+] Loaded {len(users)} users, {mode}{Colors.NC}", file=sys.stderr)
 
         # Build schedule
         schedule = Schedule.disabled()
@@ -583,6 +587,10 @@ Examples:
   # Pause during business hours (0 attempts)
   %(prog)s -d 10.0.0.1 -w CORP --users users.txt --passwords pwds.txt \\
       --lockout-window 30 --attempts 4 --timezone America/New_York --attempts-business 0
+
+  # Username-as-password only (no password list)
+  %(prog)s -d 10.0.0.1 -w CORP --users users.txt --userpass \\
+      --lockout-window 5 --attempts 1
 
   # Resume existing spray
   %(prog)s --resume 1

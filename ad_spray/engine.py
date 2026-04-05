@@ -489,7 +489,7 @@ class SprayEngine:
 
                     self._spray_single(username, username)
 
-                if not self.stopped:
+                if not self.stopped and valid_passwords:
                     self.session.attempts_since_sleep += 1
                     if self._should_sleep():
                         self._update_status_bar(extra=f"Sleeping {sleep_time // 60}m")
