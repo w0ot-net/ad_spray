@@ -289,11 +289,11 @@ class SprayEngine:
         with open(output_file, "a") as f:
             f.write(f"{username}:{password}{suffix}\n")
 
-    def _check_credential(self, username: str, password: str) -> str:
-        """Check a single credential against AD. Returns the error code."""
+    def _check_credential(self, username: str, password: str) -> dict:
+        """Check a single credential against AD. Returns the result dict."""
         config = self.session.config
         if config.use_ldap_auth:
-            result = ldap_check_auth(
+            return ldap_check_auth(
                 dc_host=config.dc_host,
                 username=username,
                 password=password,
@@ -302,14 +302,13 @@ class SprayEngine:
                 port=config.port,
             )
         else:
-            result = smb_check_auth(
+            return smb_check_auth(
                 dc_host=config.dc_host,
                 username=username,
                 password=password,
                 workgroup=config.workgroup,
                 port=config.port or 445,
             )
-        return result["status"]
 
     def _wait_for_business_hours_end(self):
         """Wait until business hours end if currently in business hours with reduced attempts <= 0."""
@@ -627,7 +626,8 @@ class SprayEngine:
             level=3, end="", screen=False
         )
 
-        status = self._check_credential(username, password)
+        result = self._check_credential(username, password)
+        status = result["status"]
         timestamp = datetime.now().isoformat()
 
         # Record the attempt using append-only storage (fast)
@@ -708,8 +708,10 @@ class SprayEngine:
             self._print(f" {Colors.RED}NO_SUCH_USER{Colors.NC}", level=2, screen=False)
 
         elif status in (ERROR_HOST_UNREACHABLE, ERROR_GEN_FAILURE):
-            # Errors go to both screen and log
-            self._print(f"{Colors.RED}[!] ERROR: {status}{Colors.NC}", level=1)
+            # Errors go to both screen and log — include raw_error for diagnosis
+            raw = result.get("raw_error", "")
+            detail = f" ({raw})" if raw else ""
+            self._print(f"{Colors.RED}[!] ERROR: {status}{detail}{Colors.NC}", level=1)
 
         else:  # ERROR_LOGON_FAILURE or other
             self.consecutive_lockouts = 0

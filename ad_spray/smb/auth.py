@@ -83,12 +83,13 @@ def check_auth(
             "message": f"Authentication failed: {status}",
             "raw_error": str(e),
         }
-    except OSError:
+    except OSError as e:
         return {
             "success": False,
             "status": ERROR_HOST_UNREACHABLE,
             "status_code": None,
             "message": f"Could not connect to {dc_host}:{port}",
+            "raw_error": str(e),
         }
     except Exception as e:
         return {
