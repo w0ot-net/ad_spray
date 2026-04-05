@@ -90,6 +90,9 @@ class ADConnection:
 
     def _auth_params(self) -> Dict[str, Any]:
         """Build Connection() authentication parameters."""
+        # Anonymous/null session when both username and password are empty.
+        if not self.username and not self.password:
+            return {}
         if self.workgroup:
             # Use NetBIOS domain/workgroup for NTLM.
             return {
