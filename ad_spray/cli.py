@@ -14,6 +14,7 @@ from .constants import (
     VALID_CREDENTIAL_STATUSES,
 )
 from .engine import SprayEngine
+from .rpc import fetch_policy_rpc, fetch_users_rpc
 from .models import DomainPolicy
 from .scheduling import (
     BusinessHoursWindow,
@@ -425,11 +426,50 @@ def cmd_export(args) -> int:
     return 0
 
 
+def _print_policy(policy: "DomainPolicy") -> int:
+    """Display a fetched domain policy and return exit code."""
+    print(f"\n{Colors.BLUE}{'═' * 50}{Colors.NC}")
+    print(f"{Colors.ORANGE} Domain Password Policy{Colors.NC}")
+    print(f"{Colors.BLUE}{'═' * 50}{Colors.NC}\n")
+
+    print(f"  {Colors.LBLUE}Lockout Threshold:{Colors.NC}      {policy.lockout_threshold}")
+    print(f"  {Colors.LBLUE}Observation Window:{Colors.NC}     {policy.lockout_observation_window_minutes} minutes")
+    print(f"  {Colors.LBLUE}Lockout Duration:{Colors.NC}       {policy.lockout_duration_minutes} minutes")
+    print(f"  {Colors.LBLUE}Min Password Length:{Colors.NC}    {policy.min_password_length}")
+    print(f"  {Colors.LBLUE}Complexity Required:{Colors.NC}    {policy.complexity_enabled}")
+
+    print(f"\n{Colors.BLUE}{'═' * 50}{Colors.NC}\n")
+
+    if policy.lockout_threshold == 0:
+        print(f"  {Colors.GREEN}No lockout policy - unlimited attempts allowed{Colors.NC}")
+    else:
+        safe_attempts = policy.lockout_threshold - 1
+        sleep_time = policy.lockout_observation_window_minutes + 1
+        print(f"  {Colors.ORANGE}Suggested spray settings:{Colors.NC}")
+        print(f"    --lockout-threshold {policy.lockout_threshold}")
+        print(f"    --lockout-window {policy.lockout_observation_window_minutes}")
+        print(f"\n  {Colors.BLUE}This means:{Colors.NC}")
+        print(f"    - {safe_attempts} password attempt(s) per user before sleeping")
+        print(f"    - {sleep_time} minute sleep between password batches")
+
+    print()
+    return 0
+
+
 def cmd_get_policy(args) -> int:
     """Fetch and display the domain lockout policy."""
     if not args.dc:
         print(f"{Colors.RED}[!] Domain controller is required (-d){Colors.NC}", file=sys.stderr)
         return 1
+
+    if getattr(args, "null_session", False):
+        try:
+            policy = fetch_policy_rpc(args.dc, port=args.port or 445)
+            return _print_policy(policy)
+        except Exception as e:
+            print(f"{Colors.RED}[!] Failed to fetch policy via RPC: {e}{Colors.NC}", file=sys.stderr)
+            return 1
+
     if not args.workgroup:
         print(f"{Colors.RED}[!] Workgroup is required (-w){Colors.NC}", file=sys.stderr)
         return 1
@@ -450,38 +490,26 @@ def cmd_get_policy(args) -> int:
             port=args.port,
             base_dn=args.base_dn,
         )
-
-        print(f"\n{Colors.BLUE}{'═' * 50}{Colors.NC}")
-        print(f"{Colors.ORANGE} Domain Password Policy{Colors.NC}")
-        print(f"{Colors.BLUE}{'═' * 50}{Colors.NC}\n")
-
-        print(f"  {Colors.LBLUE}Lockout Threshold:{Colors.NC}      {policy.lockout_threshold}")
-        print(f"  {Colors.LBLUE}Observation Window:{Colors.NC}     {policy.lockout_observation_window_minutes} minutes")
-        print(f"  {Colors.LBLUE}Lockout Duration:{Colors.NC}       {policy.lockout_duration_minutes} minutes")
-        print(f"  {Colors.LBLUE}Min Password Length:{Colors.NC}    {policy.min_password_length}")
-        print(f"  {Colors.LBLUE}Complexity Required:{Colors.NC}    {policy.complexity_enabled}")
-
-        print(f"\n{Colors.BLUE}{'═' * 50}{Colors.NC}\n")
-
-        # Provide guidance
-        if policy.lockout_threshold == 0:
-            print(f"  {Colors.GREEN}No lockout policy - unlimited attempts allowed{Colors.NC}")
-        else:
-            safe_attempts = policy.lockout_threshold - 1
-            sleep_time = policy.lockout_observation_window_minutes + 1
-            print(f"  {Colors.ORANGE}Suggested spray settings:{Colors.NC}")
-            print(f"    --lockout-threshold {policy.lockout_threshold}")
-            print(f"    --lockout-window {policy.lockout_observation_window_minutes}")
-            print(f"\n  {Colors.BLUE}This means:{Colors.NC}")
-            print(f"    - {safe_attempts} password attempt(s) per user before sleeping")
-            print(f"    - {sleep_time} minute sleep between password batches")
-
-        print()
-        return 0
+        return _print_policy(policy)
 
     except Exception as e:
         print(f"{Colors.RED}[!] Failed to fetch policy: {e}{Colors.NC}", file=sys.stderr)
         return 1
+
+
+def _save_users(users, output_file: str) -> int:
+    """Write user list to file and print summary."""
+    if not users:
+        print(f"{Colors.ORANGE}[!] No users found{Colors.NC}", file=sys.stderr)
+        return 1
+
+    with open(output_file, 'w') as f:
+        for user in users:
+            f.write(f"{user}\n")
+
+    print(f"{Colors.GREEN}[+] Found {len(users)} users{Colors.NC}", file=sys.stderr)
+    print(f"{Colors.GREEN}[+] Saved to: {output_file}{Colors.NC}", file=sys.stderr)
+    return 0
 
 
 def cmd_get_users(args) -> int:
@@ -489,6 +517,18 @@ def cmd_get_users(args) -> int:
     if not args.dc:
         print(f"{Colors.RED}[!] Domain controller is required (-d){Colors.NC}", file=sys.stderr)
         return 1
+
+    output_file = args.output or "users.txt"
+
+    if getattr(args, "null_session", False):
+        try:
+            print(f"{Colors.BLUE}[+] Connecting to {args.dc} (null session)...{Colors.NC}", file=sys.stderr)
+            users = fetch_users_rpc(args.dc, port=args.port or 445)
+            return _save_users(users, output_file)
+        except Exception as e:
+            print(f"{Colors.RED}[!] Failed to fetch users via RPC: {e}{Colors.NC}", file=sys.stderr)
+            return 1
+
     if not args.workgroup:
         print(f"{Colors.RED}[!] Workgroup is required (-w){Colors.NC}", file=sys.stderr)
         return 1
@@ -498,8 +538,6 @@ def cmd_get_users(args) -> int:
     if args.password is None:
         print(f"{Colors.RED}[!] Password is required (-p){Colors.NC}", file=sys.stderr)
         return 1
-
-    output_file = args.output or "users.txt"
 
     try:
         print(f"{Colors.BLUE}[+] Connecting to {args.dc}...{Colors.NC}", file=sys.stderr)
@@ -512,19 +550,7 @@ def cmd_get_users(args) -> int:
             port=args.port,
             base_dn=args.base_dn,
         )
-
-        if not users:
-            print(f"{Colors.ORANGE}[!] No users found{Colors.NC}", file=sys.stderr)
-            return 1
-
-        # Write to file
-        with open(output_file, 'w') as f:
-            for user in users:
-                f.write(f"{user}\n")
-
-        print(f"{Colors.GREEN}[+] Found {len(users)} users{Colors.NC}", file=sys.stderr)
-        print(f"{Colors.GREEN}[+] Saved to: {output_file}{Colors.NC}", file=sys.stderr)
-        return 0
+        return _save_users(users, output_file)
 
     except Exception as e:
         print(f"{Colors.RED}[!] Failed to fetch users: {e}{Colors.NC}", file=sys.stderr)
@@ -632,6 +658,7 @@ Examples:
 Examples:
   %(prog)s -d 10.0.0.1 -w CORP -u admin -p 'P@ss'
   %(prog)s -d dc01.corp.local -w CORP -u admin -p 'P@ss' --ssl
+  %(prog)s -d dc01.corp.local --null-session
         """,
     )
     policy_parser.add_argument("-d", "--dc", help="Domain controller FQDN or IP address")
@@ -641,6 +668,8 @@ Examples:
     policy_parser.add_argument("--base-dn", dest="base_dn", help="Override LDAP base DN")
     policy_parser.add_argument("--ssl", action="store_true", help="Use LDAPS (SSL/TLS)")
     policy_parser.add_argument("--port", type=int, help="Override port number")
+    policy_parser.add_argument("--null-session", action="store_true",
+                               help="Use anonymous RPC/SMB session (no credentials required)")
     policy_parser.set_defaults(func=cmd_get_policy)
 
     # Get-users subcommand
@@ -651,6 +680,7 @@ Examples:
 Examples:
   %(prog)s -d 10.0.0.1 -w CORP -u admin -p 'P@ss'
   %(prog)s -d dc01.corp.local -w CORP -u admin -p 'P@ss' -o targets.txt
+  %(prog)s -d dc01.corp.local --null-session
         """,
     )
     users_parser.add_argument("-d", "--dc", help="Domain controller FQDN or IP address")
@@ -661,6 +691,8 @@ Examples:
     users_parser.add_argument("--base-dn", dest="base_dn", help="Override LDAP base DN")
     users_parser.add_argument("--ssl", action="store_true", help="Use LDAPS (SSL/TLS)")
     users_parser.add_argument("--port", type=int, help="Override port number")
+    users_parser.add_argument("--null-session", action="store_true",
+                               help="Use anonymous RPC/SMB session (no credentials required)")
     users_parser.set_defaults(func=cmd_get_users)
 
     args = parser.parse_args()

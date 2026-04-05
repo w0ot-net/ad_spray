@@ -1,7 +1,9 @@
 """Constants used throughout the application."""
 
 import re
+from datetime import timedelta
 from pathlib import Path
+from typing import Any, Optional
 
 # Regex pattern to match ANSI escape codes
 _ANSI_ESCAPE_PATTERN = re.compile(r'\033\[[0-9;]*m')
@@ -66,3 +68,15 @@ SKIP_USER_STATUSES = {
 
 # Default session storage path
 DEFAULT_SESSION_PATH = Path.home() / ".adspray" / "sessions"
+
+
+def to_minutes(value: Any) -> Optional[int]:
+    """Convert a time value to minutes. Handles Windows FILETIME (negative int) or timedelta."""
+    if value is None:
+        return None
+    if isinstance(value, timedelta):
+        return int(value.total_seconds() // 60)
+    if isinstance(value, int):
+        # Windows FILETIME: 100-nanosecond intervals, negative for duration
+        return abs(value) // (10_000_000 * 60)
+    return None

@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Optional
 
 from ldap3 import ALL, BASE, NTLM, SUBTREE, Connection, Server
 
+from ..constants import to_minutes
+
 
 def is_ip_address(value: str) -> bool:
     """Check if a string is an IPv4 or IPv6 address."""
@@ -19,18 +21,6 @@ def is_ip_address(value: str) -> bool:
 def fqdn_to_base_dn(fqdn: str) -> str:
     """Convert FQDN to LDAP base DN (e.g., 'corp.example.com' -> 'DC=corp,DC=example,DC=com')"""
     return ",".join(f"DC={part}" for part in fqdn.split("."))
-
-
-def to_minutes(value: Any) -> Optional[int]:
-    """Convert a time value to minutes. Handles Windows FILETIME (negative int) or timedelta."""
-    if value is None:
-        return None
-    if isinstance(value, timedelta):
-        return int(value.total_seconds() // 60)
-    if isinstance(value, int):
-        # Windows FILETIME: 100-nanosecond intervals, negative for duration
-        return abs(value) // (10_000_000 * 60)
-    return None
 
 
 class ADConnection:
