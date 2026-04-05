@@ -101,6 +101,6 @@ def check_auth(
     finally:
         if smb is not None:
             try:
-                smb.logoff()
+                smb.close()
             except Exception:
                 pass
