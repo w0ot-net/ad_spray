@@ -64,3 +64,5 @@ All plan items implemented with no deviations:
 
 1. `ad_spray/cli.py`: Relaxed `--passwords` validation to accept `--userpass` as alternative. Wrapped password file loading in `if args.spray_passwords` with `else: passwords = []`. Updated loaded-users message to show spray mode. Added userpass-only example to epilog.
 2. `ad_spray/engine.py`: Added `valid_passwords` guard to post-userpass sleep to avoid wasted lockout-window delay when no password list is provided.
+
+Commit: 8237fcd
