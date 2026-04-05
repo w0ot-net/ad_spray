@@ -433,10 +433,10 @@ def cmd_get_policy(args) -> int:
     if not args.workgroup:
         print(f"{Colors.RED}[!] Workgroup is required (-w){Colors.NC}", file=sys.stderr)
         return 1
-    if not args.username:
+    if args.username is None:
         print(f"{Colors.RED}[!] Username is required (-u){Colors.NC}", file=sys.stderr)
         return 1
-    if not args.password:
+    if args.password is None:
         print(f"{Colors.RED}[!] Password is required (-p){Colors.NC}", file=sys.stderr)
         return 1
 
@@ -492,10 +492,10 @@ def cmd_get_users(args) -> int:
     if not args.workgroup:
         print(f"{Colors.RED}[!] Workgroup is required (-w){Colors.NC}", file=sys.stderr)
         return 1
-    if not args.username:
+    if args.username is None:
         print(f"{Colors.RED}[!] Username is required (-u){Colors.NC}", file=sys.stderr)
         return 1
-    if not args.password:
+    if args.password is None:
         print(f"{Colors.RED}[!] Password is required (-p){Colors.NC}", file=sys.stderr)
         return 1
 
