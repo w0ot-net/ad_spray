@@ -81,3 +81,5 @@ All plan items implemented. Deviations and extras:
 - **SAMR `LARGE_INTEGER` turned out to be `NDRHYPER`**: Impacket 0.11.0 represents `LockoutDuration` and `LockoutObservationWindow` as `NDRHYPER` (64-bit int via `['Data']`), not a two-field `LARGE_INTEGER` struct. `_ndrhyper_to_minutes()` handles both access patterns.
 - **`USER_NORMAL_ACCOUNT`**: Used impacket's `samr.USER_NORMAL_ACCOUNT` constant (value `0x10`) instead of a raw literal.
 - **Pagination**: `fetch_users_rpc` handles `STATUS_MORE_ENTRIES` (`0x00000105`) for domains with large user counts.
+
+Commit: `d4987e1`
