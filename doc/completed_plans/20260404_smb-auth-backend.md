@@ -123,3 +123,5 @@ All plan items implemented with no deviations:
 5. `ad_spray/engine.py`: Replaced single `check_auth` import with dual `ldap_check_auth`/`smb_check_auth`. `_check_credential` reads `config.use_ldap_auth` to select backend.
 6. `ad_spray/cli.py`: Added `--ldap-auth` flag, `ldap_auth` to defaults loop, `--ssl` warning without `--ldap-auth`, pass-through to `create_session`. Updated `--ssl` and `--port` help text.
 7. `ad_spray/config.py`: Added `ldap_auth` to `[target]` section in `load_config()`.
+
+Commit: a69781e
