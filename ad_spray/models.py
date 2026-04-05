@@ -72,6 +72,9 @@ class SprayConfig:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "SprayConfig":
+        # Old sessions predate SMB auth — they used LDAP (the only option)
+        if "use_ldap_auth" not in d:
+            d = {**d, "use_ldap_auth": True}
         return cls(**d)
 
 

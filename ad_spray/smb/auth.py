@@ -1,6 +1,5 @@
 """SMB-based authentication checking via impacket."""
 
-import socket
 from typing import Any, Dict
 
 from impacket.smbconnection import SMBConnection, SessionError
@@ -84,7 +83,7 @@ def check_auth(
             "message": f"Authentication failed: {status}",
             "raw_error": str(e),
         }
-    except (socket.error, OSError):
+    except OSError:
         return {
             "success": False,
             "status": ERROR_HOST_UNREACHABLE,
