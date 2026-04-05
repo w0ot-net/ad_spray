@@ -563,7 +563,11 @@ class SprayEngine:
             stats = self.session.get_stats()
             self._print(f"{Colors.GREEN}[+] Valid credentials:{Colors.NC} {stats.get(ERROR_SUCCESS, 0)}", level=1)
             self._print(f"{Colors.GREEN}[+] Disabled accounts:{Colors.NC} {stats.get(ERROR_ACCOUNT_DISABLED, 0)}", level=1)
-            self._print(f"{Colors.GREEN}[+] Locked accounts:{Colors.NC} {stats.get(ERROR_ACCOUNT_LOCKED_OUT, 0)}", level=1)
+            locked_users = [a.username for a in self.session.attempts if a.status == ERROR_ACCOUNT_LOCKED_OUT]
+            self._print(f"{Colors.GREEN}[+] Locked accounts:{Colors.NC} {len(locked_users)}", level=1)
+            if locked_users:
+                for user in locked_users:
+                    self._print(f"{Colors.RED}    - {user}{Colors.NC}", level=1)
 
         finally:
             self._cleanup_status_bar()
